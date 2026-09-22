@@ -1,0 +1,79 @@
+{
+  "name": "edgefuzz",
+  "version": "1.0.0",
+  "description": "Zero-config adversarial API fuzzer that finds unhandled 500 crashes in your REST APIs before they hit production",
+  "keywords": [
+    "api",
+    "fuzzing",
+    "testing",
+    "openapi",
+    "security",
+    "cli",
+    "mcp",
+    "edge-cases",
+    "rest",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/rishuyadav/edgefuzz#readme",
+  "bugs": {
+    "url": "https://github.com/rishuyadav/edgefuzz/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rishuyadav/edgefuzz.git"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Rishu Yadav",
+    "email": "rishuss1212@gmail.com",
+    "url": "https://github.com/rishuyadav"
+  },
+  "type": "module",
+  "main": "./dist/cli/index.js",
+  "bin": {
+    "edgefuzz": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "ink": "^5.0.1",
+    "ink-spinner": "^5.0.0",
+    "js-yaml": "^4.1.0",
+    "openai": "^4.98.0",
+    "p-limit": "^6.2.0",
+    "react": "^18.3.1",
+    "swagger-parser": "^10.0.3",
+    "undici": "^7.10.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.21",
+    "@types/react": "^18.3.23",
+    "@typescript-eslint/eslint-plugin": "^8.32.1",
+    "@typescript-eslint/parser": "^8.32.1",
+    "eslint": "^9.27.0",
+    "prettier": "^3.5.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
