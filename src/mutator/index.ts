@@ -243,7 +243,15 @@ function mutateEndpointStatic(endpoint: ParsedEndpoint, baseUrl: string): Mutate
   // ---- 3. Path parameter mutations ----
   const pathParams = endpoint.parameters.filter((p) => p.in === 'path');
   for (const param of pathParams) {
-    const paramMutations = [...typeBoundaryMutations(param.schema), ...encodingMutations()];
+    const tbMutations = typeBoundaryMutations(param.schema);
+    const encMutations = encodingMutations();
+    // Tag each mutation with the correct category so that encoding-class payloads
+    // (SQL injection, path traversal, null bytes, etc.) get 'encoding' severity
+    // instead of being down-graded to 'type-boundary'.
+    const paramMutations: Array<{ id: string; label: string; value: unknown; category: MutationCategory }> = [
+      ...tbMutations.map((m) => ({ ...m, category: 'type-boundary' as MutationCategory })),
+      ...encMutations.map((m) => ({ ...m, category: 'encoding' as MutationCategory })),
+    ];
 
     for (const mutation of paramMutations) {
       const mutatedPath = substitutePath(
@@ -258,7 +266,7 @@ function mutateEndpointStatic(endpoint: ParsedEndpoint, baseUrl: string): Mutate
         endpoint,
         mutationId: `path-${param.name}-${mutation.id}`,
         mutationLabel: `Path param "${param.name}": ${mutation.label}`,
-        mutationCategory: 'type-boundary',
+        mutationCategory: mutation.category,
         mutationSource: 'static',
         url: `${baseUrl}${mutatedPath}`,
         method: endpoint.method,

@@ -197,6 +197,8 @@ export interface RequestResult {
   /** True if a network-level error occurred before getting a response */
   networkError: boolean;
   networkErrorMessage?: string;
+  /** Node.js / undici error code (e.g. 'ECONNREFUSED', 'UND_ERR_HEADERS_TIMEOUT') */
+  networkErrorCode?: string;
 }
 
 // ---------------------------------------------------------------------------

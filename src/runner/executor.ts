@@ -55,14 +55,14 @@ async function executeOne(req: MutatedRequest, timeoutMs: number): Promise<Reque
   try {
     const { bodyStr, headers } = prepareBody(req);
 
+    // undici v7: request() does NOT throw on non-2xx by default.
+    // Do NOT pass throwOnError — it was removed in v7 and causes UND_ERR_INVALID_ARG.
     const response = await undiciRequest(req.url, {
       method: req.method,
       headers,
       body: bodyStr ?? undefined,
       bodyTimeout: timeoutMs,
       headersTimeout: timeoutMs,
-      // Don't throw on non-2xx — we need to capture 5xx ourselves
-      throwOnError: false,
     });
 
     const latencyMs = Date.now() - startTime;
@@ -78,12 +78,20 @@ async function executeOne(req: MutatedRequest, timeoutMs: number): Promise<Reque
     };
   } catch (err) {
     const latencyMs = Date.now() - startTime;
-    const isTimeout =
-      err instanceof Error &&
-      (err.message.includes('body timeout') ||
-        err.message.includes('header timeout') ||
-        err.message.includes('socket hang up') ||
-        err.message.includes('ETIMEDOUT'));
+    const errCode = (err instanceof Error && 'code' in err)
+      ? String((err as NodeJS.ErrnoException).code ?? '')
+      : '';
+
+    // Use error codes (stable across undici versions) rather than message strings.
+    // undici v7 timeout codes: UND_ERR_HEADERS_TIMEOUT, UND_ERR_BODY_TIMEOUT, UND_ERR_CONNECT_TIMEOUT
+    // Node.js network timeout: ETIMEDOUT
+    const TIMEOUT_CODES = new Set([
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'ETIMEDOUT',
+    ]);
+    const isTimeout = TIMEOUT_CODES.has(errCode);
 
     return {
       request: req,
@@ -93,6 +101,7 @@ async function executeOne(req: MutatedRequest, timeoutMs: number): Promise<Reque
       timedOut: isTimeout,
       networkError: true,
       networkErrorMessage: err instanceof Error ? err.message : String(err),
+      networkErrorCode: errCode || undefined,
     };
   }
 }

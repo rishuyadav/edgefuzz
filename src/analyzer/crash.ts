@@ -77,11 +77,17 @@ function isCrash(result: RequestResult): boolean {
   // Pure connection refused is not a crash of the app under test
   if (result.timedOut) return true;
 
-  // Network errors that indicate the server crashed / restarted mid-request
-  if (result.networkError && result.networkErrorMessage) {
-    const msg = result.networkErrorMessage.toLowerCase();
+  // Network errors that indicate the server crashed / restarted mid-request.
+  // ECONNREFUSED means the server was never reachable — not a crash caused by our payload.
+  // In undici v7 the ECONNREFUSED error has an empty message but err.code = 'ECONNREFUSED',
+  // so we check both the propagated message and the error code stored separately.
+  if (result.networkError) {
+    const msg = (result.networkErrorMessage ?? '').toLowerCase();
+    const code = (result.networkErrorCode ?? '').toUpperCase();
     const isConnectionRefused =
-      msg.includes('econnrefused') || msg.includes('connection refused');
+      msg.includes('econnrefused') ||
+      msg.includes('connection refused') ||
+      code === 'ECONNREFUSED';
     if (!isConnectionRefused) return true;
   }
 
