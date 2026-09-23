@@ -16,6 +16,7 @@ import { runFuzzSessionStream } from '../engine.js';
 import { runCiReporter } from '../tui/ci-reporter.js';
 import { startMcpServer } from '../mcp/server.js';
 import { Dashboard } from '../tui/dashboard.js';
+import { detectLLMProvider } from '../reporter/llm.js';
 import type { EdgeFuzzConfig, FuzzReport, ProgressEvent } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -164,11 +165,34 @@ async function main() {
     headers[name] = value;
   }
 
+  // Validate concurrency and timeout early — before any expensive work
+  const concurrency = parseInt(opts.concurrency, 10);
+  if (isNaN(concurrency) || concurrency < 1 || concurrency > 200) {
+    console.error('Concurrency must be an integer between 1 and 200.');
+    process.exit(1);
+  }
+
+  const timeoutMs = parseInt(opts.timeout, 10);
+  if (isNaN(timeoutMs) || timeoutMs < 500) {
+    console.error('Timeout must be >= 500ms.');
+    process.exit(1);
+  }
+
+  // Resolve LLM availability and emit actionable warnings for misconfigurations.
+  // This runs before building EdgeFuzzConfig so the config always reflects reality.
+  const { llmMutations, llmTriage } = resolveLlmFlags({
+    requestedMutations: opts.llmMutations === true,
+    requestedTriage: opts.triage !== false,
+    providerOverride: opts.llm as EdgeFuzzConfig['llmProvider'],
+    modelOverride: opts.llmModel,
+    isCi: opts.ci || !process.stdout.isTTY,
+  });
+
   const config: EdgeFuzzConfig = {
     targetUrl,
     specPath,
-    concurrency: parseInt(opts.concurrency, 10),
-    timeoutMs: parseInt(opts.timeout, 10),
+    concurrency,
+    timeoutMs,
     reportPath: opts.report ? opts.output : false,
     ci: opts.ci || !process.stdout.isTTY,
     headers,
@@ -176,21 +200,9 @@ async function main() {
     excludePaths: opts.exclude ? opts.exclude.split(',').map((p) => p.trim()) : undefined,
     llmProvider: opts.llm as EdgeFuzzConfig['llmProvider'],
     llmModel: opts.llmModel,
-    llmMutations: opts.llmMutations === true,
-    llmTriage: opts.triage !== false, // --no-triage sets this false
+    llmMutations,
+    llmTriage,
   };
-
-  // Validate concurrency
-  if (isNaN(config.concurrency) || config.concurrency < 1 || config.concurrency > 200) {
-    console.error('Concurrency must be an integer between 1 and 200.');
-    process.exit(1);
-  }
-
-  // Validate timeout
-  if (isNaN(config.timeoutMs) || config.timeoutMs < 500) {
-    console.error('Timeout must be >= 500ms.');
-    process.exit(1);
-  }
 
   const events = runFuzzSessionStream(config);
 
@@ -275,6 +287,75 @@ async function renderTui(
   await waitUntilExit();
   return state.report;
 }
+
+// ---------------------------------------------------------------------------
+// LLM flag resolution — single source of truth for key-presence checks
+// ---------------------------------------------------------------------------
+
+interface ResolveLlmFlagsInput {
+  requestedMutations: boolean;
+  requestedTriage: boolean;
+  providerOverride?: EdgeFuzzConfig['llmProvider'];
+  modelOverride?: string;
+  isCi: boolean;
+}
+
+interface ResolvedLlmFlags {
+  llmMutations: boolean;
+  llmTriage: boolean;
+}
+
+/**
+ * Validates LLM flag combinations against actual key availability and returns
+ * the final effective values, emitting clear warnings for misconfigurations.
+ *
+ * Rules:
+ *  - If no key is detected, both llmMutations and llmTriage are forced to false.
+ *  - If --llm-mutations is passed but no key is found, a warning is printed.
+ *  - llmTriage defaults to true only when a key is actually present.
+ *    This makes config semantics honest — the engine never silently ignores it.
+ *  - --no-triage is always respected even when a key is present.
+ */
+function resolveLlmFlags(input: ResolveLlmFlagsInput): ResolvedLlmFlags {
+  const { requestedMutations, requestedTriage, providerOverride, modelOverride, isCi } = input;
+
+  const llmConfig = detectLLMProvider(providerOverride, modelOverride);
+  const keyPresent = llmConfig !== null;
+
+  // --llm-mutations requested but no key available
+  if (requestedMutations && !keyPresent) {
+    const warning = [
+      '',
+      '  Warning: --llm-mutations requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
+      '           No key found — falling back to static-only mode.',
+      '           Set one of those environment variables to enable LLM mutations.',
+      '',
+    ].join('\n');
+    // Always write to stderr so it appears even when stdout is piped
+    process.stderr.write(warning + '\n');
+  }
+
+  // --no-triage is an explicit opt-out — respect it even when key is present.
+  // llmTriage defaults to true only when the user has a key (opt-out model),
+  // not when they don't (which would create a silently-ignored true in the config).
+  const llmTriage = requestedTriage && keyPresent;
+  const llmMutations = requestedMutations && keyPresent;
+
+  // In static-only mode, print a brief mode note to stderr so it's clear
+  // what is running. Omit in CI to avoid polluting structured log output.
+  if (!keyPresent && !isCi) {
+    process.stderr.write(
+      '  EdgeFuzz: running in static-only mode (no LLM key detected)\n' +
+        '            Set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable LLM features.\n\n',
+    );
+  }
+
+  return { llmMutations, llmTriage };
+}
+
+// ---------------------------------------------------------------------------
+// Utility helpers
+// ---------------------------------------------------------------------------
 
 function collect(val: string, prev: string[]): string[] {
   return [...prev, val];
