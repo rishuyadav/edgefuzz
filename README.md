@@ -1,8 +1,11 @@
 # ⚡ EdgeFuzz
 
-**Zero-config adversarial API fuzzer that finds unhandled 500 crashes in your REST APIs before they hit production.**
+**Zero-config adversarial API fuzzer — static rules + optional LLM intelligence — finds unhandled 500 crashes in your REST APIs before they hit production.**
 
-EdgeFuzz automatically generates hundreds of adversarial edge-case payloads from your OpenAPI spec and fires them at your local server — catching `NullPointerExceptions`, integer overflows, encoding crashes, and structural panics in seconds, not weeks.
+EdgeFuzz works in two modes:
+
+- **Static mode** (default, zero cost): Fires 70+ hardcoded adversarial mutations per endpoint. No API key needed. Fast.
+- **LLM-augmented mode** (opt-in): Adds LLM-generated semantic payloads and crash triage. Bring your own key.
 
 [![CI](https://github.com/rishuyadav/edgefuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/rishuyadav/edgefuzz/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/edgefuzz)](https://www.npmjs.com/package/edgefuzz)
@@ -14,37 +17,93 @@ EdgeFuzz automatically generates hundreds of adversarial edge-case payloads from
 
 Writing edge-case tests is tedious. Tools like Postman and unit test suites only cover the happy path. EdgeFuzz fills the gap by:
 
-- **Finding real crashes automatically** — not just invalid-input 400s, but actual unhandled 500s your server throws
+- **Finding real crashes automatically** — not just invalid-input 400s, but actual unhandled 500s
 - **Working with any tech stack** — language-agnostic, output is `curl` commands that work everywhere
 - **Running in seconds** — concurrent HTTP harness fires 100+ requests/second
-- **Integrating with AI workflows** — runs as an MCP server so AI coding agents can self-audit their generated code
+- **Integrating with AI workflows** — MCP server mode lets AI coding agents self-audit their generated code
 
 ---
 
 ## Quick Start
 
 ```bash
-# Zero-install: just point at your running server
+# Zero-install, static mode — no API key needed
 npx edgefuzz http://localhost:8080
 
-# With an explicit spec file
-npx edgefuzz http://localhost:3000 ./openapi.yaml
+# With LLM crash triage (auto-enabled when key is set)
+OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080
 
-# Auto-discovers /openapi.json on common ports if no spec given
-npx edgefuzz http://localhost:8080
+# Full LLM mode: semantic mutations + crash triage
+OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --llm-mutations
 ```
 
-**That's it.** EdgeFuzz will:
-1. Discover and parse your OpenAPI spec
-2. Generate ~30-50 adversarial mutations per endpoint
-3. Fire them all concurrently at your server
-4. Print a live TUI dashboard with real-time crash detection
-5. Write `edgefuzz-report.json` with `curl` reproducers for every crash
+---
+
+## How LLM is Used
+
+EdgeFuzz uses LLMs in two distinct, optional phases. **Static rules always run regardless** — the LLM only augments.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      EdgeFuzz Pipeline                              │
+├─────────────────┬───────────────────────────────────────────────────┤
+│  Stage 1        │  Parse OpenAPI spec (auto-discover or explicit)   │
+├─────────────────┼───────────────────────────────────────────────────┤
+│  Stage 2        │  Static mutations (always runs, zero API cost)    │
+│  Phase A (LLM)  │  + LLM semantic mutations (--llm-mutations flag)  │
+├─────────────────┼───────────────────────────────────────────────────┤
+│  Stage 3        │  Concurrent HTTP execution (undici, 100+ req/s)   │
+├─────────────────┼───────────────────────────────────────────────────┤
+│  Stage 4        │  Crash deduplication (SHA-1 by rule family)       │
+│  Phase C (LLM)  │  + LLM crash triage (auto when key present)      │
+├─────────────────┼───────────────────────────────────────────────────┤
+│  Stage 5        │  curl reproducers + edgefuzz-report.json          │
+└─────────────────┴───────────────────────────────────────────────────┘
+```
+
+### Phase A — LLM Semantic Mutation Generation (`--llm-mutations`)
+
+Static rules cover type-boundary and structural edge cases but can't understand your API's *business domain*. The LLM reads your endpoint schema and generates payloads that only domain knowledge can produce:
+
+| Static rule generates | LLM generates for `POST /api/v1/orders` |
+|:----------------------|:----------------------------------------|
+| `quantity: MAX_INT+1` | `quantity: -5, coupon: "ADMIN_OVERRIDE"` (privilege escalation hint) |
+| `quantity: null` | `quantity: 999999` (bulk order beyond inventory) |
+| `coupon: ""` | `coupon: "EXPIRED2019"` (domain-aware: expired code) |
+| `userId: "\x00"` | `start_date: "2030-01-01", end_date: "2020-01-01"` (chronological contradiction) |
+
+**How it works:**
+- One LLM call per endpoint (not per field) — minimal token cost
+- LLM is explicitly told which categories static rules already cover — focuses on gaps
+- Structured JSON output only — LLM cannot inject free text into the fuzzing pipeline
+- Capped at 10 semantic mutations per endpoint
+- Degrades gracefully: any LLM failure → static rules still run
+
+### Phase C — LLM Crash Triage (automatic when key present)
+
+After fuzzing, the LLM reads each crash's response body (which may contain stack traces, SQL errors, ORM messages) and returns structured analysis:
+
+```json
+{
+  "rootCause": "sql-error",
+  "confidence": 0.92,
+  "notes": "The server passes the coupon field directly into an SQL query without parameterization.",
+  "duplicateOf": null,
+  "severityOverride": "high"
+}
+```
+
+**What this provides:**
+- **Root cause labels** — 14 canonical categories (`integer-overflow`, `sql-error`, `null-pointer`, `injection`, etc.) — never free text, always structured
+- **Confidence score** — filters out low-confidence findings (test environment artifacts)
+- **Cross-crash deduplication** — identifies when 10 different field mutations hit the same code bug, reducing noise
+- **Severity override** — LLM can upgrade severity when it sees a SQL error vs. downgrade when the response body is a generic 500 with no useful information
 
 ---
 
 ## Demo Output
 
+### Static mode
 ```
  EdgeFuzz v1.0.0  |  target: http://localhost:8080
 ─────────────────────────────────────────────────────────
@@ -56,23 +115,25 @@ npx edgefuzz http://localhost:8080
  1. POST /api/v1/orders
     ├─ Mutation   Field "quantity": MAX_INT + 1 (64-bit overflow)
     ├─ Result     HTTP 500  severity: medium
-    ├─ Category   type-boundary
-    └─ Reproducer:
-       curl -i -X POST -H 'Content-Type: application/json' \
-         -d '{"quantity":9223372036854775808,"coupon":null}' \
-         'http://localhost:8080/api/v1/orders'
+    └─ Reproducer: curl -i -X POST -H 'Content-Type: application/json' \
+         -d '{"quantity":9223372036854775808}' 'http://localhost:8080/api/v1/orders'
+```
 
- 2. PUT /api/v1/user/profile
-    ├─ Mutation   Encoding "bio": Null byte (\x00)
-    ├─ Result     HTTP 500  severity: high
-    ├─ Category   encoding
-    └─ Reproducer:
-       curl -i -X PUT -H 'Content-Type: application/json' \
-         -d '{"bio":"\u0000"}' \
-         'http://localhost:8080/api/v1/user/profile'
+### LLM-augmented mode (`--llm-mutations`)
+```
+ EdgeFuzz v1.0.0  |  target: http://localhost:8080  |  LLM✓ +24 semantic
+─────────────────────────────────────────────────────────────────────────
+ Progress  ████████████████████  444/444 (100%)
+─────────────────────────────────────────────────────────────────────────
+ ✗ Found 3 unique crashes (+1 duplicate root cause):
 
-─────────────────────────────────────────────────────────
- Report written to: edgefuzz-report.json
+ 1. POST /api/v1/orders  [LLM payload]
+    ├─ Mutation   [LLM] Expired promotional coupon code
+    ├─ Result     HTTP 500  severity: high (LLM override)
+    ├─ Root cause sql-error  (confidence: 91%)
+    ├─ Analysis   The server passes the coupon field directly into an SQL
+    │             query without validation, causing a parse error on special chars.
+    └─ Reproducer: curl -i -X POST -d '{"quantity":1,"coupon":"EXPIRED'\''19"}' ...
 ```
 
 ---
@@ -80,14 +141,11 @@ npx edgefuzz http://localhost:8080
 ## Installation
 
 ```bash
-# Temporary: use without installing
+# Zero-install (recommended)
 npx edgefuzz http://localhost:8080
 
-# Global install
+# Global
 npm install -g edgefuzz
-
-# Then run
-edgefuzz http://localhost:8080
 ```
 
 ---
@@ -112,32 +170,20 @@ Options:
   -H, --header <header>  Add a request header. Repeatable.
   --include <paths>      Only fuzz paths matching this prefix (comma-separated)
   --exclude <paths>      Skip paths matching this prefix (comma-separated)
-  --llm <provider>       LLM for fix suggestions: "openai" or "anthropic"
+  --llm <provider>       LLM provider: "openai" or "anthropic"
   --llm-model <model>    Override the LLM model name
+  --llm-mutations        Enable LLM semantic mutations (Phase A). Requires key.
+  --no-triage            Disable LLM crash triage (Phase C)
   -h, --help             Display help
 ```
 
-### Examples
+### LLM Modes
 
-```bash
-# Fuzz with authentication
-edgefuzz http://localhost:8080 -H "Authorization: Bearer my-token"
-
-# Only audit /api/v1 endpoints
-edgefuzz http://localhost:8080 --include /api/v1
-
-# CI mode — exits with code 1 if crashes found
-edgefuzz http://localhost:8080 --ci
-
-# High concurrency (be careful with rate limits)
-edgefuzz http://localhost:8080 -c 50
-
-# With LLM fix suggestions (requires API key)
-OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080
-
-# Use Anthropic instead
-ANTHROPIC_API_KEY=sk-ant-... edgefuzz http://localhost:8080
-```
+| Mode | Command | What runs |
+|:-----|:--------|:----------|
+| Static only | `edgefuzz http://localhost:8080` | 70+ hardcoded rules |
+| + Triage | `OPENAI_API_KEY=... edgefuzz ...` | Static + LLM crash analysis |
+| + Mutations | `OPENAI_API_KEY=... edgefuzz ... --llm-mutations` | Static + LLM payloads + triage |
 
 ---
 
@@ -145,125 +191,94 @@ ANTHROPIC_API_KEY=sk-ant-... edgefuzz http://localhost:8080
 
 | Variable | Description |
 |:---------|:------------|
-| `OPENAI_API_KEY` | Enable AI fix suggestions via OpenAI (uses `gpt-4o-mini` by default) |
-| `ANTHROPIC_API_KEY` | Enable AI fix suggestions via Anthropic (uses `claude-3-5-haiku` by default) |
-| `EDGEFUZZ_LLM_MODEL` | Override the default LLM model name |
+| `OPENAI_API_KEY` | Enable LLM features via OpenAI (`gpt-4o-mini` default) |
+| `ANTHROPIC_API_KEY` | Enable LLM features via Anthropic (`claude-3-5-haiku` default) |
+| `EDGEFUZZ_LLM_MODEL` | Override default model name |
 
 ---
 
-## What EdgeFuzz Tests
+## What EdgeFuzz Tests (Static Rules)
 
 ### Type Boundary Mutations
 - `MAX_INT + 1` / `MIN_INT - 1` (integer overflow/underflow)
-- Float where integer expected
-- Boolean coercion (`true`/`"true"`/`1`)
-- Null in non-nullable fields
-- Strings where numbers expected
+- Float where integer expected, NaN, Infinity
+- Null in non-nullable fields, empty string, whitespace-only
 - Values violating `minimum`/`maximum`/`minLength`/`maxLength` schema bounds
+- Enum violations (value outside declared enum set)
 
 ### Structural Mutations
-- Empty body `{}`
-- Null body
-- Array instead of object
-- Missing required fields (one by one)
-- All fields set to null
-- Extra unknown fields (`__proto__` pollution)
-- Deeply nested objects (depth 100)
-- Oversized payloads (~1MB)
-- Wrong Content-Type headers
+- Empty body `{}`, null body, array/string/integer instead of object
+- Missing required fields (each individually — isolates which field breaks the server)
+- All fields set to null simultaneously
+- Deeply nested objects (depth 100), oversized payloads (~1MB)
+- Extra unknown fields, `__proto__` pollution attempt
+- Wrong Content-Type headers (form-encoded, text/plain, XML to JSON endpoints)
 
 ### Encoding & Security Mutations
-- Null bytes (`\x00`, `\x00` embedded in strings)
-- Unicode edge cases (surrogates, BOM, RTL override, ZWJ emoji sequences)
-- CRLF injection
-- SQL injection fragments (`' OR '1'='1`, `'; DROP TABLE users;--`)
-- NoSQL injection (`$gt`, `$where`)
+- Null bytes (`\x00`, embedded in strings)
+- Unicode edge cases (surrogates, BOM, RTL override, ZWJ sequences)
+- CRLF injection, SQL/NoSQL injection fragments
 - Server-side template injection (`{{7*7}}`)
-- Path traversal (`../../etc/passwd`)
-- Oversized strings (1MB)
+- Path traversal (`../../etc/passwd`, encoded variant)
+- Oversized strings (1MB ASCII, 100K Unicode)
 
 ### Format Violations
-- Invalid emails, malformed UUIDs
-- Out-of-range dates (`9999-99-99`)
-- `file://` and `javascript:` URIs
-- Password fields with null bytes
+- Invalid emails, malformed UUIDs, out-of-range dates
+- `file://` and `javascript:` URIs in URL fields
 
 ---
 
 ## Report Format
 
-`edgefuzz-report.json` is a structured, machine-readable report:
+`edgefuzz-report.json` — structured, machine-readable:
 
 ```json
 {
   "version": "1",
   "generatedAt": "2024-01-15T10:30:00.000Z",
   "target": "http://localhost:8080",
-  "specSource": "http://localhost:8080/openapi.json",
+  "llmEnabled": true,
   "summary": {
-    "totalRequests": 420,
+    "totalRequests": 444,
     "totalEndpoints": 18,
-    "totalCrashes": 2,
-    "durationMs": 3050,
-    "requestsPerSecond": 137
+    "totalCrashes": 3,
+    "totalDuplicates": 1,
+    "llmMutations": 24,
+    "durationMs": 3200,
+    "requestsPerSecond": 138
   },
   "crashes": [
     {
       "id": "a3f8c1d2e4b5",
       "severity": "medium",
-      "endpoint": { "method": "POST", "path": "/api/v1/orders" },
-      "mutationLabel": "Field \"quantity\": MAX_INT + 1 (64-bit overflow)",
-      "mutationCategory": "type-boundary",
+      "llmSeverity": "high",
+      "mutationSource": "llm",
+      "mutationCategory": "semantic",
+      "mutationLabel": "[LLM] Expired promotional coupon code",
+      "rootCause": "sql-error",
+      "confidence": 0.91,
+      "triageNotes": "The server passes the coupon field directly into SQL without sanitization.",
+      "duplicateOf": null,
       "statusCode": 500,
-      "latencyMs": 12,
-      "timedOut": false,
-      "triggeringPayload": { "quantity": 9223372036854775808 },
-      "curlReproducer": "curl -i -X POST ...",
-      "llmFixSuggestion": "The server is not validating integer bounds before passing to the database..."
+      "curlReproducer": "curl -i -X POST ..."
     }
   ]
 }
 ```
 
-### Severity Levels
-
-| Severity | Condition |
-|:---------|:----------|
-| `critical` | Server hang/timeout or network-level crash |
-| `high` | 500 from encoding or security mutation (potential injection surface) |
-| `medium` | 500 from type-boundary or structural mutation (logic error) |
-
 ---
 
 ## MCP Server Mode (AI Agent Integration)
 
-EdgeFuzz can run as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, exposing its fuzzing engine as a tool that AI coding agents can call directly.
-
-### Setup
-
 ```bash
-# Start the MCP server
 edgefuzz --mcp
 ```
 
-Add to your AI agent's MCP config (e.g., Claude Desktop `claude_desktop_config.json`):
+Add to Claude Desktop / OpenCode config:
 
 ```json
 {
   "mcpServers": {
-    "edgefuzz": {
-      "command": "npx",
-      "args": ["edgefuzz", "--mcp"]
-    }
-  }
-}
-```
-
-Or for **OpenCode** (`.opencode/config.json`):
-
-```json
-{
-  "mcp": {
     "edgefuzz": {
       "command": "npx",
       "args": ["edgefuzz@latest", "--mcp"]
@@ -274,49 +289,18 @@ Or for **OpenCode** (`.opencode/config.json`):
 
 ### Available MCP Tools
 
-#### `edgefuzz_audit`
-Full API audit against an OpenAPI spec.
+| Tool | Description |
+|:-----|:------------|
+| `edgefuzz_audit` | Full API audit — returns Markdown report with crash details, root causes, and curl reproducers |
+| `edgefuzz_quick_check` | Targeted audit of a single endpoint path |
 
-```
-Parameters:
-  target_url     (required) Base URL of the running API
-  spec_url       (optional) URL or path to OpenAPI spec
-  concurrency    (optional) Max concurrent requests, default 10
-  timeout_ms     (optional) Per-request timeout, default 5000
-  include_paths  (optional) Array of path prefixes to include
-  exclude_paths  (optional) Array of path prefixes to exclude
-  headers        (optional) Additional request headers
-```
-
-#### `edgefuzz_quick_check`
-Targeted audit of a single endpoint path.
-
-```
-Parameters:
-  target_url  (required) Base URL
-  spec_url    (required) URL or path to OpenAPI spec
-  path        (required) Endpoint path, e.g. /api/v1/users/{id}
-  method      (optional) HTTP method filter
-  concurrency (optional) default 5
-  headers     (optional) Additional request headers
-```
-
-### Example AI Workflow
-
-When you ask an AI agent to build a new API endpoint:
-
-1. Agent generates the endpoint code
-2. Agent calls `edgefuzz_quick_check` with the new endpoint path
-3. EdgeFuzz fires adversarial payloads at the running server
-4. If crashes are found, the agent reads the crash report and fixes the code
-5. Re-runs until zero crashes — **shipping resilient code automatically**
+The MCP response includes LLM triage fields (`rootCause`, `confidence`, `triageNotes`) which give the AI agent the information it needs to locate and fix the bug in the codebase.
 
 ---
 
 ## CI/CD Integration
 
 ```yaml
-# .github/workflows/api-audit.yml
 - name: Run EdgeFuzz Audit
   run: |
     npx edgefuzz@latest \
@@ -324,62 +308,40 @@ When you ask an AI agent to build a new API endpoint:
       http://localhost:8080/openapi.json \
       --ci \
       --output edgefuzz-report.json
-  # Exits with code 1 if crashes found — blocks the PR
-
-- name: Upload Report
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: edgefuzz-report
-    path: edgefuzz-report.json
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # optional, enables triage
 ```
 
-See [`.github/workflows/edgefuzz-action.yml`](.github/workflows/edgefuzz-action.yml) for a complete example.
+Exit code 1 if crashes found → PR is blocked. See [`.github/workflows/edgefuzz-action.yml`](.github/workflows/edgefuzz-action.yml) for the full example.
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────┐
-│             EdgeFuzz Core Engine            │
-│  (Schema Parser + Smart Mutator + Fuzzer)   │
-└──────────────────────┬──────────────────────┘
-                       │
-     ┌─────────────────┼──────────────────┐
-     ▼                 ▼                  ▼
-┌──────────┐    ┌──────────────┐   ┌──────────────┐
-│ CLI/NPX  │    │  MCP Server  │   │ GitHub Action│
-│ edgefuzz │    │ --mcp flag   │   │ CI/CD gate   │
-└──────────┘    └──────────────┘   └──────────────┘
-```
-
 **5-stage pipeline:**
 
 | Stage | Module | Description |
 |:------|:-------|:------------|
-| 1. Ingest | `src/parser/openapi.ts` | Parse OpenAPI 3.x spec, auto-discover on localhost |
-| 2. Mutate | `src/mutator/` | Generate adversarial payload matrix |
-| 3. Execute | `src/runner/executor.ts` | Concurrent HTTP harness (undici + p-limit) |
-| 4. Analyze | `src/analyzer/crash.ts` | Classify and deduplicate 5xx findings |
-| 5. Report | `src/reporter/` | `curl` reproducers, JSON report, optional LLM |
+| 1. Ingest | `src/parser/openapi.ts` | Parse OpenAPI 3.x, auto-discover on localhost |
+| 2. Mutate | `src/mutator/` | Static rules + optional LLM semantic mutations |
+| 3. Execute | `src/runner/executor.ts` | Concurrent HTTP (undici + p-limit) |
+| 4. Analyze | `src/analyzer/` | Dedup + optional LLM triage (root cause, confidence, cross-crash dedup) |
+| 5. Report | `src/reporter/` | curl reproducers + JSON report |
 
 ---
 
 ## Contributing
 
-PRs welcome! Areas that would have the most impact:
+PRs welcome. High-impact areas:
 
-- **New mutation rules** — add to `src/mutator/type-boundary.ts` or `encoding.ts`
-- **GraphQL support** — add `src/parser/graphql.ts` and wire into `engine.ts`
-- **Test harness** — integration tests against a simple Express server
-- **Rate limiting** — smart backoff when the target returns 429
+- **New static mutation rules** — add to `src/mutator/type-boundary.ts` or `encoding.ts`
+- **GraphQL support** — add `src/parser/graphql.ts`
+- **Integration tests** — test against a minimal Express server fixture
+- **LLM prompt tuning** — improve semantic mutation diversity or triage accuracy
 
 ```bash
 git clone https://github.com/rishuyadav/edgefuzz.git
-cd edgefuzz
-npm install
-npm run build
+cd edgefuzz && npm install && npm run build
 node dist/cli/index.js --help
 ```
 
