@@ -18,39 +18,71 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
 
   for await (const event of events) {
     switch (event.type) {
+      case 'llm_mutations_generating':
+        console.log(
+          chalk.magenta(`[EdgeFuzz] LLM generating semantic mutations for ${event.endpointCount} endpoints...`),
+        );
+        break;
+
+      case 'llm_mutations_ready':
+        console.log(
+          chalk.magenta(`[EdgeFuzz] LLM generated ${event.count} semantic mutations`),
+        );
+        break;
+
       case 'start':
         totalRequests = event.totalRequests;
         console.log(
-          chalk.dim(`[EdgeFuzz] Starting: ${event.totalEndpoints} endpoints, ${totalRequests} total requests`),
+          chalk.dim(
+            `[EdgeFuzz] Starting: ${event.totalEndpoints} endpoints, ${totalRequests} requests` +
+              (event.llmEnabled ? chalk.magenta(' [LLM enabled]') : ''),
+          ),
         );
         break;
 
       case 'request_done':
         doneRequests++;
-        // Print progress every 50 requests or at 25/50/75/100%
-        if (doneRequests % 50 === 0 || [25, 50, 75, 100].includes(Math.round((doneRequests / totalRequests) * 100))) {
+        if (
+          doneRequests % 50 === 0 ||
+          [25, 50, 75, 100].includes(Math.round((doneRequests / totalRequests) * 100))
+        ) {
           const pct = totalRequests > 0 ? Math.round((doneRequests / totalRequests) * 100) : 0;
-          process.stdout.write(`\r${chalk.dim(`[EdgeFuzz] ${pct}% (${doneRequests}/${totalRequests})`)}`);
+          process.stdout.write(
+            `\r${chalk.dim(`[EdgeFuzz] ${pct}% (${doneRequests}/${totalRequests})`)}`,
+          );
         }
         break;
 
       case 'crash_found': {
         const crash = event.crash;
-        // Deduplicate
         if (!crashes.find((c) => c.id === crash.id)) {
           crashes.push(crash);
           process.stdout.write('\n');
+          const source = crash.mutationSource === 'llm' ? chalk.magenta(' [LLM payload]') : '';
           console.log(
             chalk.red(`[CRASH] ${crash.endpoint.method} ${crash.endpoint.path}`) +
               chalk.dim(` → HTTP ${crash.statusCode}`) +
+              source +
               chalk.yellow(` [${crash.mutationLabel}]`),
           );
         }
         break;
       }
 
-      case 'llm_suggestion':
-        // Already handled via crash update — not printed separately in CI mode
+      case 'triage_start':
+        process.stdout.write('\n');
+        console.log(
+          chalk.magenta(`[EdgeFuzz] LLM triaging ${event.crashCount} crash${event.crashCount !== 1 ? 'es' : ''}...`),
+        );
+        break;
+
+      case 'triage_done':
+        // Update local crash array with triage-enriched versions
+        for (const enriched of event.crashes) {
+          const idx = crashes.findIndex((c) => c.id === enriched.id);
+          if (idx >= 0) crashes[idx] = enriched;
+        }
+        console.log(chalk.magenta('[EdgeFuzz] Triage complete'));
         break;
 
       case 'done':
@@ -63,46 +95,69 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
 
 function printCiSummary(report: FuzzReport, crashes: CrashFinding[]): void {
   const { summary } = report;
+
   console.log(chalk.dim('─'.repeat(60)));
-  console.log(chalk.cyan('⚡ EdgeFuzz Audit Complete'));
+  console.log(
+    chalk.cyan('⚡ EdgeFuzz Audit Complete') +
+      (report.llmEnabled ? chalk.magenta('  [LLM-augmented]') : ''),
+  );
   console.log(
     chalk.dim(
       `Requests: ${summary.totalRequests}  |  Endpoints: ${summary.totalEndpoints}  |  ` +
         `Duration: ${(summary.durationMs / 1000).toFixed(1)}s  |  Speed: ${summary.requestsPerSecond} req/s`,
     ),
   );
+  if (summary.llmMutations > 0) {
+    console.log(chalk.dim(`LLM mutations: ${summary.llmMutations}`));
+  }
 
   if (crashes.length === 0) {
     console.log(chalk.green('✓ No unhandled crashes found.'));
     return;
   }
 
-  console.log(chalk.red(`\n✗ Found ${crashes.length} unhandled crash${crashes.length !== 1 ? 'es' : ''}:\n`));
+  // Separate primary from duplicates
+  const primaryCrashes = crashes.filter((c) => !c.duplicateOf);
+  const dupCount = crashes.filter((c) => c.duplicateOf).length;
 
-  for (let i = 0; i < crashes.length; i++) {
-    const crash = crashes[i]!;
+  console.log(
+    chalk.red(
+      `\n✗ Found ${primaryCrashes.length} unique crash${primaryCrashes.length !== 1 ? 'es' : ''}` +
+        (dupCount > 0 ? ` (+${dupCount} duplicate root causes)` : '') +
+        ':\n',
+    ),
+  );
+
+  for (let i = 0; i < primaryCrashes.length; i++) {
+    const crash = primaryCrashes[i]!;
     const statusLabel = crash.timedOut ? 'TIMEOUT' : `HTTP ${crash.statusCode}`;
+    const effectiveSeverity = crash.llmSeverity ?? crash.severity;
+    const source = crash.mutationSource === 'llm' ? ' [LLM payload]' : '';
 
     console.log(
       chalk.bold(`${i + 1}. ${crash.endpoint.method} ${crash.endpoint.path}`) +
         chalk.red(` → ${statusLabel}`) +
-        chalk.dim(` [severity: ${crash.severity}]`),
+        chalk.dim(` [severity: ${effectiveSeverity}]`) +
+        (source ? chalk.magenta(source) : ''),
     );
-    console.log(chalk.dim(`   Mutation: ${crash.mutationLabel}`));
-    console.log(chalk.dim('   Reproducer:'));
-    console.log(chalk.cyan(`   ${crash.curlReproducer.replace(/\s*\\\n\s*/g, ' ')}`));
+    console.log(chalk.dim(`   Mutation : ${crash.mutationLabel}`));
 
-    if (crash.llmFixSuggestion) {
-      console.log(chalk.yellow('\n   💡 Fix suggestion:'));
-      console.log(`   ${crash.llmFixSuggestion.replace(/\n/g, '\n   ')}`);
+    // LLM triage fields
+    if (crash.rootCause) {
+      const confidence =
+        crash.confidence !== undefined
+          ? ` (${Math.round(crash.confidence * 100)}% confidence)`
+          : '';
+      console.log(chalk.yellow(`   Root cause: ${crash.rootCause}${confidence}`));
+    }
+    if (crash.triageNotes) {
+      console.log(chalk.dim(`   Analysis : ${crash.triageNotes}`));
     }
 
+    console.log(chalk.dim('   Reproducer:'));
+    console.log(chalk.cyan(`   ${crash.curlReproducer.replace(/\s*\\\n\s*/g, ' ')}`));
     console.log();
   }
 
-  console.log(
-    chalk.dim(
-      `Report written to: ${chalk.cyan('edgefuzz-report.json')}`,
-    ),
-  );
+  console.log(chalk.dim(`Report: ${chalk.cyan('edgefuzz-report.json')}`));
 }

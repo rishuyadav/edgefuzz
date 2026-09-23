@@ -3,6 +3,10 @@
  *
  * Orchestrates all mutation rule sets and produces a flat list of
  * MutatedRequest objects ready to be fired by the executor.
+ *
+ * Two modes:
+ *  static-only (default):  type-boundary + structural + encoding rules
+ *  +llm (opt-in):          above + LLM-generated semantic payloads per endpoint
  */
 
 import type {
@@ -12,43 +16,90 @@ import type {
   MutatedRequest,
   JsonSchema,
   MutationCategory,
+  SemanticMutation,
 } from '../types/index.js';
 import { typeBoundaryMutations } from './type-boundary.js';
 import { structuralMutations } from './structural.js';
 import { encodingMutations } from './encoding.js';
+import {
+  generateSemanticMutationsBatch,
+  type LLMConfig,
+} from './semantic.js';
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+export interface GenerateMutationsOptions {
+  /**
+   * When true, calls the LLM to generate additional semantic mutations
+   * after all static rules have run. Requires llmConfig to be provided.
+   * Default: false
+   */
+  llmMutations?: boolean;
+  llmConfig?: LLMConfig;
+  /** Progress callback for the LLM generation phase */
+  onLlmProgress?: (done: number, total: number) => void;
+}
+
 /**
  * Generate the full set of adversarial requests for an entire parsed spec.
- * Returns a flat array — one entry per (endpoint × mutation) combination.
+ *
+ * In static-only mode (default): synchronous, zero API cost.
+ * In LLM-augmented mode (llmMutations: true): async, makes one LLM call
+ * per endpoint in parallel batches, then appends semantic mutations.
  */
-export function generateMutations(spec: ParsedSpec): MutatedRequest[] {
-  const requests: MutatedRequest[] = [];
+export async function generateMutations(
+  spec: ParsedSpec,
+  options: GenerateMutationsOptions = {},
+): Promise<MutatedRequest[]> {
+  const { llmMutations = false, llmConfig, onLlmProgress } = options;
 
+  // --- Phase A.1: Static mutations (always runs, zero cost) ---
+  const staticRequests: MutatedRequest[] = [];
   for (const endpoint of spec.endpoints) {
-    requests.push(...mutateEndpoint(endpoint, spec.baseUrl));
+    staticRequests.push(...mutateEndpointStatic(endpoint, spec.baseUrl));
   }
 
-  return requests;
+  if (!llmMutations) {
+    return staticRequests;
+  }
+
+  // --- Phase A.2: LLM semantic mutations (opt-in, requires API key) ---
+  const semanticMap = await generateSemanticMutationsBatch(
+    spec.endpoints,
+    llmConfig,
+    onLlmProgress,
+  );
+
+  const semanticRequests: MutatedRequest[] = [];
+  for (const endpoint of spec.endpoints) {
+    const key = `${endpoint.method}:${endpoint.path}`;
+    const mutations = semanticMap.get(key) ?? [];
+    semanticRequests.push(...mutateEndpointSemantic(endpoint, spec.baseUrl, mutations));
+  }
+
+  // Static first, semantic appended — static always provides baseline coverage
+  return [...staticRequests, ...semanticRequests];
 }
 
 // ---------------------------------------------------------------------------
-// Per-endpoint mutation
+// Static per-endpoint mutation
 // ---------------------------------------------------------------------------
 
-function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedRequest[] {
+function mutateEndpointStatic(endpoint: ParsedEndpoint, baseUrl: string): MutatedRequest[] {
   const requests: MutatedRequest[] = [];
-  const baseHeaders: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  const baseHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
 
   // ---- 1. Body mutations (POST / PUT / PATCH) ----
   if (endpoint.requestBody) {
     const { schema } = endpoint.requestBody;
     const validPayload = generateValidPayload(schema);
 
-    // Type-boundary mutations on top-level fields
+    // Type-boundary mutations on each top-level field
     if (schema.properties) {
       for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
         const fieldMutations = typeBoundaryMutations(fieldSchema);
@@ -72,38 +123,25 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
     // Structural mutations
     const structMutations = structuralMutations(schema, validPayload);
     for (const mutation of structMutations) {
-      // Special case: raw JSON string that bypasses normal serialization
-      if (typeof mutation.body === 'string' && mutation.body.startsWith('__RAW_JSON__:')) {
-        requests.push(
-          makeRequest(endpoint, baseUrl, baseHeaders, {
-            mutationId: mutation.id,
-            mutationLabel: mutation.label,
-            mutationCategory: 'structural',
-            body: mutation.body, // executor will detect this and send raw
-          }),
-        );
-      } else {
-        requests.push(
-          makeRequest(endpoint, baseUrl, baseHeaders, {
-            mutationId: mutation.id,
-            mutationLabel: mutation.label,
-            mutationCategory: 'structural',
-            body: mutation.body,
-          }),
-        );
-      }
+      requests.push(
+        makeRequest(endpoint, baseUrl, baseHeaders, {
+          mutationId: mutation.id,
+          mutationLabel: mutation.label,
+          mutationCategory: 'structural',
+          body: mutation.body,
+        }),
+      );
     }
 
-    // Encoding mutations applied to every string field
+    // Encoding mutations on all string fields
     if (schema.properties) {
       const stringFields = Object.entries(schema.properties).filter(
         ([, s]) => resolveType(s) === 'string',
       );
       if (stringFields.length > 0) {
         const encMutations = encodingMutations();
+        const [firstField] = stringFields[0]!;
         for (const enc of encMutations) {
-          // Apply the encoding value to the first string field (representative)
-          const [firstField] = stringFields[0]!;
           const body = {
             ...(isObject(validPayload) ? validPayload : {}),
             [firstField]: enc.value,
@@ -121,7 +159,12 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
     }
 
     // Content-type confusion mutations
-    const contentTypeMutations: Array<{ id: string; label: string; contentType: string; body: string }> = [
+    const contentTypeMutations: Array<{
+      id: string;
+      label: string;
+      contentType: string;
+      body: string;
+    }> = [
       {
         id: 'ct-form-encoded',
         label: 'Wrong content-type: application/x-www-form-urlencoded',
@@ -144,16 +187,21 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
 
     for (const ct of contentTypeMutations) {
       requests.push(
-        makeRequest(endpoint, baseUrl, { ...baseHeaders, 'Content-Type': ct.contentType }, {
-          mutationId: ct.id,
-          mutationLabel: ct.label,
-          mutationCategory: 'structural',
-          body: ct.body,
-        }),
+        makeRequest(
+          endpoint,
+          baseUrl,
+          { ...baseHeaders, 'Content-Type': ct.contentType },
+          {
+            mutationId: ct.id,
+            mutationLabel: ct.label,
+            mutationCategory: 'structural',
+            body: ct.body,
+          },
+        ),
       );
     }
   } else {
-    // No request body — still send a spurious body to test server robustness
+    // No request body — send spurious body to test server robustness
     requests.push(
       makeRequest(endpoint, baseUrl, baseHeaders, {
         mutationId: 'no-body-spurious',
@@ -176,9 +224,9 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
     ];
 
     for (const mutation of allParamMutations) {
-      const baseQueryParams = buildBaseQueryParams(queryParams, param.name);
-      const queryParamsWithMutation = {
-        ...baseQueryParams,
+      const baseQParams = buildBaseQueryParams(queryParams, param.name);
+      const qParamsWithMutation = {
+        ...baseQParams,
         [param.name]: String(mutation.value ?? 'null'),
       };
       requests.push(
@@ -186,7 +234,7 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
           mutationId: `query-${param.name}-${mutation.id}`,
           mutationLabel: `Query param "${param.name}": ${mutation.label}`,
           mutationCategory: mutation.category,
-          queryParams: queryParamsWithMutation,
+          queryParams: qParamsWithMutation,
         }),
       );
     }
@@ -195,13 +243,15 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
   // ---- 3. Path parameter mutations ----
   const pathParams = endpoint.parameters.filter((p) => p.in === 'path');
   for (const param of pathParams) {
-    const paramMutations = [
-      ...typeBoundaryMutations(param.schema),
-      ...encodingMutations(),
-    ];
+    const paramMutations = [...typeBoundaryMutations(param.schema), ...encodingMutations()];
 
     for (const mutation of paramMutations) {
-      const mutatedPath = substitutePath(endpoint.path, pathParams, param.name, mutation.value);
+      const mutatedPath = substitutePath(
+        endpoint.path,
+        pathParams,
+        param.name,
+        mutation.value,
+      );
       if (mutatedPath === null) continue;
 
       requests.push({
@@ -209,6 +259,7 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
         mutationId: `path-${param.name}-${mutation.id}`,
         mutationLabel: `Path param "${param.name}": ${mutation.label}`,
         mutationCategory: 'type-boundary',
+        mutationSource: 'static',
         url: `${baseUrl}${mutatedPath}`,
         method: endpoint.method,
         headers: baseHeaders,
@@ -239,6 +290,44 @@ function mutateEndpoint(endpoint: ParsedEndpoint, baseUrl: string): MutatedReque
 }
 
 // ---------------------------------------------------------------------------
+// LLM semantic per-endpoint mutation (Phase A)
+// ---------------------------------------------------------------------------
+
+function mutateEndpointSemantic(
+  endpoint: ParsedEndpoint,
+  baseUrl: string,
+  semanticMutations: SemanticMutation[],
+): MutatedRequest[] {
+  const requests: MutatedRequest[] = [];
+  const baseHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+
+  for (let i = 0; i < semanticMutations.length; i++) {
+    const mutation = semanticMutations[i]!;
+    const mutationId = `semantic-${i}-${endpoint.method.toLowerCase()}-${endpoint.path.replace(/\W+/g, '-')}`;
+
+    const url = buildUrl(endpoint, baseUrl, mutation.queryParams);
+
+    requests.push({
+      endpoint,
+      mutationId,
+      mutationLabel: `[LLM] ${mutation.label}`,
+      mutationCategory: 'semantic',
+      mutationSource: 'llm',
+      url,
+      method: endpoint.method,
+      headers: baseHeaders,
+      queryParams: mutation.queryParams,
+      body: mutation.body,
+    });
+  }
+
+  return requests;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -256,7 +345,6 @@ function makeRequest(
   headers: Record<string, string>,
   overrides: RequestOverrides,
 ): MutatedRequest {
-  // Build URL: substitute path params with valid defaults, append query string
   const url = buildUrl(endpoint, baseUrl, overrides.queryParams);
 
   return {
@@ -264,6 +352,7 @@ function makeRequest(
     mutationId: overrides.mutationId,
     mutationLabel: overrides.mutationLabel,
     mutationCategory: overrides.mutationCategory,
+    mutationSource: 'static',
     url,
     method: endpoint.method,
     headers,
@@ -280,10 +369,12 @@ function buildUrl(
   const pathParams = endpoint.parameters.filter((p) => p.in === 'path');
   let urlPath = endpoint.path;
 
-  // Substitute path params with valid placeholder values
   for (const param of pathParams) {
     const placeholder = getValidPathValue(param.schema, param.name);
-    urlPath = urlPath.replace(`{${param.name}}`, encodeURIComponent(String(placeholder)));
+    urlPath = urlPath.replace(
+      `{${param.name}}`,
+      encodeURIComponent(String(placeholder)),
+    );
   }
 
   let url = `${baseUrl}${urlPath}`;
@@ -319,13 +410,14 @@ function substitutePath(
   let path = pathTemplate;
   for (const param of pathParams) {
     if (param.name === mutatedParamName) {
-      // Use the mutated value — may be a special value that breaks path parsing
       const strVal = mutatedValue === null ? 'null' : String(mutatedValue);
-      // Avoid double-encoding — just substitute raw (executor will handle)
       path = path.replace(`{${param.name}}`, strVal);
     } else {
       const validVal = getValidPathValue(param.schema, param.name);
-      path = path.replace(`{${param.name}}`, encodeURIComponent(String(validVal)));
+      path = path.replace(
+        `{${param.name}}`,
+        encodeURIComponent(String(validVal)),
+      );
     }
   }
   return path;
@@ -333,7 +425,7 @@ function substitutePath(
 
 /**
  * Generate a plausible "valid" payload from a schema.
- * Used as the baseline that mutation rules modify.
+ * Used as the baseline that static mutation rules modify.
  */
 export function generateValidPayload(schema: JsonSchema): unknown {
   const type = resolveType(schema);

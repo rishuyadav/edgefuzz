@@ -38,6 +38,7 @@ export function analyseCrash(result: RequestResult): CrashFinding | null {
     mutationId: result.request.mutationId,
     mutationLabel: result.request.mutationLabel,
     mutationCategory: result.request.mutationCategory,
+    mutationSource: result.request.mutationSource,
     statusCode: result.statusCode,
     responseBody: result.responseBody,
     latencyMs: result.latencyMs,

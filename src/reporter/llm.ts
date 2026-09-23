@@ -16,24 +16,37 @@ export interface LLMConfig {
   model?: string;
 }
 
-/** Detect which LLM provider is available from environment variables. */
-export function detectLLMProvider(): LLMConfig | null {
+/**
+ * Detect which LLM provider is available from environment variables.
+ * Optional overrides from CLI flags take precedence over auto-detection.
+ */
+export function detectLLMProvider(
+  providerOverride?: LLMProvider,
+  modelOverride?: string,
+): LLMConfig | null {
+  const modelEnv = process.env['EDGEFUZZ_LLM_MODEL'];
+
+  // If provider is explicitly specified, require that provider's key
+  if (providerOverride === 'openai') {
+    const key = process.env['OPENAI_API_KEY'];
+    if (!key) return null;
+    return { provider: 'openai', apiKey: key, model: modelOverride ?? modelEnv ?? 'gpt-4o-mini' };
+  }
+  if (providerOverride === 'anthropic') {
+    const key = process.env['ANTHROPIC_API_KEY'];
+    if (!key) return null;
+    return { provider: 'anthropic', apiKey: key, model: modelOverride ?? modelEnv ?? 'claude-3-5-haiku-20241022' };
+  }
+
+  // Auto-detect: OpenAI takes precedence over Anthropic
   const openaiKey = process.env['OPENAI_API_KEY'];
   if (openaiKey) {
-    return {
-      provider: 'openai',
-      apiKey: openaiKey,
-      model: process.env['EDGEFUZZ_LLM_MODEL'] ?? 'gpt-4o-mini',
-    };
+    return { provider: 'openai', apiKey: openaiKey, model: modelOverride ?? modelEnv ?? 'gpt-4o-mini' };
   }
 
   const anthropicKey = process.env['ANTHROPIC_API_KEY'];
   if (anthropicKey) {
-    return {
-      provider: 'anthropic',
-      apiKey: anthropicKey,
-      model: process.env['EDGEFUZZ_LLM_MODEL'] ?? 'claude-3-5-haiku-20241022',
-    };
+    return { provider: 'anthropic', apiKey: anthropicKey, model: modelOverride ?? modelEnv ?? 'claude-3-5-haiku-20241022' };
   }
 
   return null;

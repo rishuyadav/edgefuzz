@@ -15,6 +15,8 @@ export interface ReportInput {
   spec: ParsedSpec;
   crashes: CrashFinding[];
   totalRequests: number;
+  llmMutationCount: number;
+  llmEnabled: boolean;
   durationMs: number;
 }
 
@@ -22,19 +24,24 @@ export interface ReportInput {
  * Build the structured FuzzReport object from a completed fuzzing session.
  */
 export function buildReport(input: ReportInput): FuzzReport {
-  const { spec, crashes, totalRequests, durationMs } = input;
+  const { spec, crashes, totalRequests, llmMutationCount, llmEnabled, durationMs } = input;
   const requestsPerSecond =
     durationMs > 0 ? Math.round((totalRequests / durationMs) * 1000) : 0;
+
+  const totalDuplicates = crashes.filter((c) => c.duplicateOf !== undefined).length;
 
   return {
     version: '1',
     generatedAt: new Date().toISOString(),
     target: spec.baseUrl,
     specSource: spec.specSource,
+    llmEnabled,
     summary: {
       totalRequests,
       totalEndpoints: spec.endpoints.length,
       totalCrashes: crashes.length,
+      totalDuplicates,
+      llmMutations: llmMutationCount,
       durationMs,
       requestsPerSecond,
     },

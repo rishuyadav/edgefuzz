@@ -78,6 +78,8 @@ export async function startMcpServer(): Promise<void> {
         headers: params.headers ?? {},
         includePaths: params.include_paths,
         excludePaths: params.exclude_paths,
+        llmMutations: false, // Not in MCP semantic mode by default
+        llmTriage: true,     // Always triage in MCP — agents benefit most from it
       };
 
       let report: FuzzReport;
@@ -136,6 +138,8 @@ export async function startMcpServer(): Promise<void> {
         ci: true,
         headers: params.headers ?? {},
         includePaths: [params.path],
+        llmMutations: false,
+        llmTriage: true,
       };
 
       let report: FuzzReport;

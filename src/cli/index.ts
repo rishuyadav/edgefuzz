@@ -56,9 +56,17 @@ program
   .option('--exclude <paths>', 'Skip paths matching this prefix (comma-separated)')
   .option(
     '--llm <provider>',
-    'LLM provider for fix suggestions: "openai" or "anthropic" (auto-detected from env)',
+    'LLM provider: "openai" or "anthropic" (auto-detected from env if omitted)',
   )
-  .option('--llm-model <model>', 'Override the LLM model name');
+  .option('--llm-model <model>', 'Override the LLM model name')
+  .option(
+    '--llm-mutations',
+    'Enable LLM-generated semantic mutations (Phase A). Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
+  )
+  .option(
+    '--no-triage',
+    'Disable LLM crash triage (Phase C). Triage runs by default when a key is present.',
+  );
 
 program.addHelpText(
   'after',
@@ -85,9 +93,23 @@ Examples:
   # Only fuzz /api/v1 endpoints
   $ edgefuzz http://localhost:8080 --include /api/v1
 
+  # LLM-augmented mode: semantic mutations + crash triage
+  $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --llm-mutations
+
+  # LLM triage only (no semantic mutations, just root-cause analysis of crashes)
+  $ ANTHROPIC_API_KEY=sk-ant-... edgefuzz http://localhost:8080
+
+  # Disable triage even when key is present
+  $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --no-triage
+
+LLM Modes:
+  Static only (default):  no key needed — hardcoded adversarial rules
+  + Triage (auto):        key present → LLM classifies crashes by root cause
+  + Mutations (opt-in):   --llm-mutations → LLM generates semantic payloads too
+
 Environment variables:
-  OPENAI_API_KEY      Enable LLM fix suggestions via OpenAI
-  ANTHROPIC_API_KEY   Enable LLM fix suggestions via Anthropic
+  OPENAI_API_KEY      Enable LLM features via OpenAI (gpt-4o-mini by default)
+  ANTHROPIC_API_KEY   Enable LLM features via Anthropic (claude-3-5-haiku by default)
   EDGEFUZZ_LLM_MODEL  Override default LLM model name
 `,
 );
@@ -111,6 +133,8 @@ async function main() {
     exclude?: string;
     llm?: string;
     llmModel?: string;
+    llmMutations?: boolean;
+    triage: boolean; // commander uses --no-triage → opts.triage = false
   }>();
 
   // ---- MCP mode ----
@@ -152,6 +176,8 @@ async function main() {
     excludePaths: opts.exclude ? opts.exclude.split(',').map((p) => p.trim()) : undefined,
     llmProvider: opts.llm as EdgeFuzzConfig['llmProvider'],
     llmModel: opts.llmModel,
+    llmMutations: opts.llmMutations === true,
+    llmTriage: opts.triage !== false, // --no-triage sets this false
   };
 
   // Validate concurrency
