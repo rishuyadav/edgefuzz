@@ -32,10 +32,20 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
 
       case 'start':
         totalRequests = event.totalRequests;
+        if (event.llmEnabled) {
+          console.log(
+            chalk.magenta('[EdgeFuzz] Mode: LLM-augmented') +
+              chalk.dim(' (crash triage enabled; use --llm-mutations for semantic payloads)'),
+          );
+        } else {
+          console.log(
+            chalk.dim('[EdgeFuzz] Mode: static-only') +
+              chalk.dim(' (set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable LLM features)'),
+          );
+        }
         console.log(
           chalk.dim(
-            `[EdgeFuzz] Starting: ${event.totalEndpoints} endpoints, ${totalRequests} requests` +
-              (event.llmEnabled ? chalk.magenta(' [LLM enabled]') : ''),
+            `[EdgeFuzz] Starting: ${event.totalEndpoints} endpoints, ${totalRequests} requests`,
           ),
         );
         break;

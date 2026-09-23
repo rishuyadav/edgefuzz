@@ -229,14 +229,16 @@ function RunningView({
         <Text color="white">{truncate(target, 40)}</Text>
         <Text dimColor>  |  spec: </Text>
         <Text color="white">{truncate(specSource, 40)}</Text>
-        {llmEnabled && (
+        <Text dimColor>  |  </Text>
+        {llmEnabled ? (
           <>
-            <Text dimColor>  |  </Text>
-            <Text color="magenta">LLM✓</Text>
+            <Text color="magenta" bold>LLM✓</Text>
             {llmMutationCount > 0 && (
               <Text dimColor> +{llmMutationCount} semantic</Text>
             )}
           </>
+        ) : (
+          <Text dimColor>static-only mode</Text>
         )}
       </Box>
 
@@ -290,7 +292,10 @@ function SummaryView({ report, crashes }: { report: FuzzReport; crashes: CrashFi
       {/* Header */}
       <Box marginBottom={1}>
         <Text bold color="cyan">⚡ EdgeFuzz Audit Complete</Text>
-        {report.llmEnabled && <Text color="magenta">  [LLM-augmented]</Text>}
+        {report.llmEnabled
+          ? <Text color="magenta">  [LLM-augmented]</Text>
+          : <Text dimColor>  [static-only — set OPENAI_API_KEY to enable LLM features]</Text>
+        }
       </Box>
 
       {/* Stats */}
