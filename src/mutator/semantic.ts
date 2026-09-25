@@ -215,7 +215,7 @@ function describeParameters(params: import('../types/index.js').ParsedParameter[
 
 async function callOpenAIStructured(prompt: string, config: LLMConfig): Promise<string> {
   const { default: OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: config.apiKey });
+  const client = new OpenAI({ apiKey: config.apiKey, ...(config.baseUrl ? { baseURL: config.baseUrl } : {}) });
 
   const response = await client.chat.completions.create({
     model: config.model ?? 'gpt-4o-mini',

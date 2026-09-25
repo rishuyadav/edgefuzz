@@ -293,6 +293,12 @@ export interface EdgeFuzzConfig {
   /** Override LLM model name */
   llmModel?: string;
   /**
+   * Custom base URL for the LLM API endpoint.
+   * Use this to point at a LiteLLM proxy, local Ollama, or any OpenAI-compatible server.
+   * Reads EDGEFUZZ_LLM_BASE_URL from env when not set via --llm-base-url.
+   */
+  llmBaseUrl?: string;
+  /**
    * Enable LLM-generated semantic mutations (Phase A).
    * Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.
    * Default: false (static rules always run regardless).

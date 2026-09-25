@@ -43,7 +43,7 @@ export async function runFuzzSession(
   const startTime = Date.now();
 
   // Detect LLM availability once — used across multiple stages
-  const llmConfig = detectLLMProvider(config.llmProvider, config.llmModel);
+  const llmConfig = detectLLMProvider(config.llmProvider, config.llmModel, config.llmBaseUrl);
   const llmEnabled = llmConfig !== null;
 
   // ------------------------------------------------------------------

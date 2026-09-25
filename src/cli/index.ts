@@ -61,6 +61,10 @@ program
   )
   .option('--llm-model <model>', 'Override the LLM model name')
   .option(
+    '--llm-base-url <url>',
+    'Custom base URL for the LLM API (e.g. LiteLLM proxy). Overrides EDGEFUZZ_LLM_BASE_URL env var.',
+  )
+  .option(
     '--llm-mutations',
     'Enable LLM-generated semantic mutations (Phase A). Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
   )
@@ -109,9 +113,10 @@ LLM Modes:
   + Mutations (opt-in):   --llm-mutations → LLM generates semantic payloads too
 
 Environment variables:
-  OPENAI_API_KEY      Enable LLM features via OpenAI (gpt-4o-mini by default)
-  ANTHROPIC_API_KEY   Enable LLM features via Anthropic (claude-3-5-haiku by default)
-  EDGEFUZZ_LLM_MODEL  Override default LLM model name
+  OPENAI_API_KEY          Enable LLM features via OpenAI (gpt-4o-mini by default)
+  ANTHROPIC_API_KEY       Enable LLM features via Anthropic (claude-3-5-haiku by default)
+  EDGEFUZZ_LLM_MODEL      Override default LLM model name
+  EDGEFUZZ_LLM_BASE_URL   Custom LLM API base URL (LiteLLM proxy, Ollama, etc.)
 `,
 );
 
@@ -200,6 +205,7 @@ async function main() {
     excludePaths: opts.exclude ? opts.exclude.split(',').map((p) => p.trim()) : undefined,
     llmProvider: opts.llm as EdgeFuzzConfig['llmProvider'],
     llmModel: opts.llmModel,
+    llmBaseUrl: (opts as Record<string, unknown>)['llmBaseUrl'] as string | undefined,
     llmMutations,
     llmTriage,
   };
