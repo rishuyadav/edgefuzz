@@ -31,7 +31,7 @@
   "type": "module",
   "main": "./dist/cli/index.js",
   "bin": {
-    "edgefuzz": "./dist/cli/index.js"
+    "edgefuzz": "dist/cli/index.js"
   },
   "files": [
     "dist",
