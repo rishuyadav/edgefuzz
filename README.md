@@ -35,6 +35,15 @@ OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080
 
 # Full LLM mode: semantic mutations + crash triage
 OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --llm-mutations
+
+# Via Anthropic instead of OpenAI
+ANTHROPIC_API_KEY=sk-ant-... npx edgefuzz http://localhost:8080 --llm-mutations
+
+# Via LiteLLM proxy or any OpenAI-compatible endpoint (Ollama, Azure, etc.)
+EDGEFUZZ_LLM_BASE_URL=http://localhost:4000/v1 \
+OPENAI_API_KEY=<proxy-key> \
+EDGEFUZZ_LLM_MODEL=claude-sonnet-4-5 \
+npx edgefuzz http://localhost:8080 --llm-mutations
 ```
 
 ---
@@ -172,6 +181,7 @@ Options:
   --exclude <paths>      Skip paths matching this prefix (comma-separated)
   --llm <provider>       LLM provider: "openai" or "anthropic"
   --llm-model <model>    Override the LLM model name
+  --llm-base-url <url>   Custom LLM API base URL (LiteLLM, Ollama, Azure, etc.)
   --llm-mutations        Enable LLM semantic mutations (Phase A). Requires key.
   --no-triage            Disable LLM crash triage (Phase C)
   -h, --help             Display help
@@ -181,9 +191,11 @@ Options:
 
 | Mode | Command | What runs |
 |:-----|:--------|:----------|
-| Static only | `edgefuzz http://localhost:8080` | 70+ hardcoded rules |
+| Static only | `edgefuzz http://localhost:8080` | 70+ hardcoded rules, no key needed |
 | + Triage | `OPENAI_API_KEY=... edgefuzz ...` | Static + LLM crash analysis |
 | + Mutations | `OPENAI_API_KEY=... edgefuzz ... --llm-mutations` | Static + LLM payloads + triage |
+| Anthropic | `ANTHROPIC_API_KEY=... edgefuzz ...` | Same as above via Anthropic |
+| Proxy / LiteLLM | `EDGEFUZZ_LLM_BASE_URL=... edgefuzz ...` | Any OpenAI-compatible endpoint |
 
 ---
 
@@ -193,7 +205,8 @@ Options:
 |:---------|:------------|
 | `OPENAI_API_KEY` | Enable LLM features via OpenAI (`gpt-4o-mini` default) |
 | `ANTHROPIC_API_KEY` | Enable LLM features via Anthropic (`claude-3-5-haiku` default) |
-| `EDGEFUZZ_LLM_MODEL` | Override default model name |
+| `EDGEFUZZ_LLM_MODEL` | Override default model name (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
+| `EDGEFUZZ_LLM_BASE_URL` | Custom LLM API base URL — point at LiteLLM, Ollama, Azure OpenAI, or any OpenAI-compatible proxy. When set, `OPENAI_API_KEY` is used as the proxy token. |
 
 ---
 
