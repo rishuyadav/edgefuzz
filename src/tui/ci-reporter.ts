@@ -8,7 +8,7 @@
 import chalk from 'chalk';
 import type { ProgressEvent, CrashFinding, FuzzReport } from '../types/index.js';
 
-export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promise<void> {
+export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promise<{ totalCrashes: number }> {
   let totalRequests = 0;
   let doneRequests = 0;
   const crashes: CrashFinding[] = [];
@@ -101,6 +101,8 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
         break;
     }
   }
+
+  return { totalCrashes: crashes.filter((c) => !c.duplicateOf).length };
 }
 
 function printCiSummary(report: FuzzReport, crashes: CrashFinding[]): void {

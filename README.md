@@ -1,11 +1,8 @@
 # ⚡ EdgeFuzz
 
-**Zero-config adversarial API fuzzer — static rules + optional LLM intelligence — finds unhandled 500 crashes in your REST APIs before they hit production.**
+**Adversarial API fuzzer that finds unhandled 500 crashes in your REST APIs before they hit production.**
 
-EdgeFuzz works in two modes:
-
-- **Static mode** (default, zero cost): Fires 70+ hardcoded adversarial mutations per endpoint. No API key needed. Fast.
-- **LLM-augmented mode** (opt-in): Adds LLM-generated semantic payloads and crash triage. Bring your own key.
+Point it at any OpenAPI 3.x server — no config files, no API key, no setup. Fires 70+ adversarial mutations per endpoint and gives you `curl` commands that reproduce every crash.
 
 [![CI](https://github.com/rishuyadav/edgefuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/rishuyadav/edgefuzz/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/edgefuzz)](https://www.npmjs.com/package/edgefuzz)
@@ -13,30 +10,39 @@ EdgeFuzz works in two modes:
 
 ---
 
-## Why EdgeFuzz?
+## Quickstart
 
-Writing edge-case tests is tedious. Tools like Postman and unit test suites only cover the happy path. EdgeFuzz fills the gap by:
+> **Requires:** Node.js 18+. First run downloads ~15 MB of dependencies (~20s); subsequent runs are instant.
 
-- **Finding real crashes automatically** — not just invalid-input 400s, but actual unhandled 500s
-- **Working with any tech stack** — language-agnostic, output is `curl` commands that work everywhere
-- **Running in seconds** — concurrent HTTP harness fires 100+ requests/second
-- **Integrating with AI workflows** — MCP server mode lets AI coding agents self-audit their generated code
+### Try it right now — no server needed
+
+```bash
+npx edgefuzz --demo
+```
+
+This starts a built-in vulnerable Course Catalog API, fuzzes it, and shows you real crashes in ~5 seconds. Zero setup.
 
 ---
 
-## Quick Start
+### Fuzz your own API
+
+Your server needs to expose an [OpenAPI 3.x](https://swagger.io/specification/) spec. EdgeFuzz auto-discovers it at common paths (`/openapi.json`, `/swagger.json`, etc.).
 
 ```bash
-# Zero-install, static mode — no API key needed
+# Auto-discover spec (checks /openapi.json, /swagger.json, and more)
 npx edgefuzz http://localhost:8080
 
-# With LLM crash triage (auto-enabled when key is set)
+# Provide the spec explicitly (skip auto-discovery)
+npx edgefuzz http://localhost:8080 --spec ./openapi.yaml
+npx edgefuzz http://localhost:8080 --spec http://localhost:8080/api-docs
+
+# Add LLM crash triage — automatic when a key is set
 OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080
 
 # Full LLM mode: semantic mutations + crash triage
 OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --llm-mutations
 
-# Via Anthropic instead of OpenAI
+# Via Anthropic
 ANTHROPIC_API_KEY=sk-ant-... npx edgefuzz http://localhost:8080 --llm-mutations
 
 # Via LiteLLM proxy or any OpenAI-compatible endpoint (Ollama, Azure, etc.)
@@ -46,31 +52,46 @@ EDGEFUZZ_LLM_MODEL=claude-sonnet-4-5 \
 npx edgefuzz http://localhost:8080 --llm-mutations
 ```
 
+**Output:** A live TUI progress bar, crash details with `curl` reproducers, and `edgefuzz-report.json`. Exits with code 1 if crashes are found — CI-friendly.
+
+> **Don't have an OpenAPI spec?** EdgeFuzz requires one to know what to fuzz. If your server doesn't expose one, use `--demo` to explore the tool, or add OpenAPI generation to your framework ([Express](https://www.npmjs.com/package/swagger-autogen), [FastAPI](https://fastapi.tiangolo.com/tutorial/first-steps/), [Rails](https://github.com/rswag/rswag), etc.).
+
 ---
 
-## How LLM is Used
+## Why EdgeFuzz?
 
-EdgeFuzz uses LLMs in two distinct, optional phases. **Static rules always run regardless** — the LLM only augments.
+Writing edge-case tests is tedious. Tools like Postman and unit test suites only cover the happy path. EdgeFuzz fills the gap by:
+
+- **Finding real crashes automatically** — not just invalid-input 400s, but actual unhandled 500s
+- **Working with any tech stack** — language-agnostic; output is `curl` commands that work everywhere
+- **Running in seconds** — concurrent HTTP harness fires 100+ requests/second
+- **Integrating with AI workflows** — MCP server mode lets AI coding agents self-audit their generated code
+
+---
+
+## How LLM Features Work
+
+EdgeFuzz uses LLMs in two optional phases. **Static rules always run regardless** — the LLM only augments.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      EdgeFuzz Pipeline                              │
 ├─────────────────┬───────────────────────────────────────────────────┤
-│  Stage 1        │  Parse OpenAPI spec (auto-discover or explicit)   │
-├─────────────────┼───────────────────────────────────────────────────┤
+│  Stage 1        │  Parse OpenAPI spec (auto-discover or --spec)     │
+├─────────────────┬───────────────────────────────────────────────────┤
 │  Stage 2        │  Static mutations (always runs, zero API cost)    │
-│  Phase A (LLM)  │  + LLM semantic mutations (--llm-mutations flag)  │
+│  LLM Phase 1    │  + LLM semantic mutations (--llm-mutations flag)  │
 ├─────────────────┼───────────────────────────────────────────────────┤
 │  Stage 3        │  Concurrent HTTP execution (undici, 100+ req/s)   │
 ├─────────────────┼───────────────────────────────────────────────────┤
 │  Stage 4        │  Crash deduplication (SHA-1 by rule family)       │
-│  Phase C (LLM)  │  + LLM crash triage (auto when key present)      │
+│  LLM Phase 2    │  + LLM crash triage (auto when key present)      │
 ├─────────────────┼───────────────────────────────────────────────────┤
 │  Stage 5        │  curl reproducers + edgefuzz-report.json          │
 └─────────────────┴───────────────────────────────────────────────────┘
 ```
 
-### Phase A — LLM Semantic Mutation Generation (`--llm-mutations`)
+### LLM Phase 1 — Semantic Mutation Generation (`--llm-mutations`)
 
 Static rules cover type-boundary and structural edge cases but can't understand your API's *business domain*. The LLM reads your endpoint schema and generates payloads that only domain knowledge can produce:
 
@@ -83,14 +104,14 @@ Static rules cover type-boundary and structural edge cases but can't understand 
 
 **How it works:**
 - One LLM call per endpoint (not per field) — minimal token cost
-- LLM is explicitly told which categories static rules already cover — focuses on gaps
+- LLM is told which categories static rules already cover — focuses on gaps
 - Structured JSON output only — LLM cannot inject free text into the fuzzing pipeline
 - Capped at 10 semantic mutations per endpoint
 - Degrades gracefully: any LLM failure → static rules still run
 
-### Phase C — LLM Crash Triage (automatic when key present)
+### LLM Phase 2 — Crash Triage (automatic when key present)
 
-After fuzzing, the LLM reads each crash's response body (which may contain stack traces, SQL errors, ORM messages) and returns structured analysis:
+After fuzzing, the LLM reads each crash's response body (stack traces, SQL errors, ORM messages) and returns structured analysis:
 
 ```json
 {
@@ -105,8 +126,8 @@ After fuzzing, the LLM reads each crash's response body (which may contain stack
 **What this provides:**
 - **Root cause labels** — 14 canonical categories (`integer-overflow`, `sql-error`, `null-pointer`, `injection`, etc.) — never free text, always structured
 - **Confidence score** — filters out low-confidence findings (test environment artifacts)
-- **Cross-crash deduplication** — identifies when 10 different field mutations hit the same code bug, reducing noise
-- **Severity override** — LLM can upgrade severity when it sees a SQL error vs. downgrade when the response body is a generic 500 with no useful information
+- **Cross-crash deduplication** — identifies when 10 different field mutations hit the same code bug
+- **Severity override** — LLM can upgrade severity based on reading the stack trace
 
 ---
 
@@ -151,9 +172,12 @@ After fuzzing, the LLM reads each crash's response body (which may contain stack
 
 ```bash
 # Zero-install (recommended)
+npx edgefuzz --demo
+
+# Or point at your server directly
 npx edgefuzz http://localhost:8080
 
-# Global
+# Global install
 npm install -g edgefuzz
 ```
 
@@ -162,29 +186,31 @@ npm install -g edgefuzz
 ## Usage
 
 ```
-Usage: edgefuzz [options] [target-url] [spec-path]
+Usage: edgefuzz [options] [target-url]
 
 Arguments:
-  target-url             Base URL of the running API server
-  spec-path              Path or URL to OpenAPI 3.x spec (auto-discovered if omitted)
+  target-url               Base URL of the running API server
 
 Options:
-  -V, --version          Output the version number
-  --mcp                  Start as an MCP server (for AI coding agents)
-  -c, --concurrency <n>  Max concurrent requests (default: 20)
-  -t, --timeout <ms>     Per-request timeout in milliseconds (default: 5000)
-  -o, --output <path>    Report output path (default: edgefuzz-report.json)
-  --no-report            Skip writing the JSON report file
-  --ci                   CI mode: plain text output, no TUI
-  -H, --header <header>  Add a request header. Repeatable.
-  --include <paths>      Only fuzz paths matching this prefix (comma-separated)
-  --exclude <paths>      Skip paths matching this prefix (comma-separated)
-  --llm <provider>       LLM provider: "openai" or "anthropic"
-  --llm-model <model>    Override the LLM model name
-  --llm-base-url <url>   Custom LLM API base URL (LiteLLM, Ollama, Azure, etc.)
-  --llm-mutations        Enable LLM semantic mutations (Phase A). Requires key.
-  --no-triage            Disable LLM crash triage (Phase C)
-  -h, --help             Display help
+  -V, --version            Output the version number
+  --demo                   Start the built-in demo API and fuzz it (no setup needed)
+  --spec <path>            Path or URL to OpenAPI 3.x spec (auto-discovered if omitted)
+  --mcp                    Start as an MCP server (for AI coding agents)
+  -c, --concurrency <n>    Max concurrent requests (default: 20)
+  -t, --timeout <ms>       Per-request timeout in milliseconds (default: 5000)
+  -o, --output <path>      Report output path (default: edgefuzz-report.json)
+  --no-report              Skip writing the JSON report file
+  --ci                     Force CI mode: plain text output, no TUI
+                           (auto-detected when stdout is not a TTY)
+  -H, --header <header>    Add a request header (repeatable)
+  --include <paths>        Only fuzz paths matching this prefix (comma-separated)
+  --exclude <paths>        Skip paths matching this prefix (comma-separated)
+  --llm <provider>         LLM provider: "openai" or "anthropic"
+  --llm-model <model>      Override the LLM model name
+  --llm-base-url <url>     Custom LLM API base URL (LiteLLM, Ollama, Azure, etc.)
+  --llm-mutations          Enable LLM semantic mutations. Requires key.
+  --no-triage              Disable LLM crash triage
+  -h, --help               Display help
 ```
 
 ### LLM Modes
@@ -287,7 +313,7 @@ Options:
 edgefuzz --mcp
 ```
 
-Add to Claude Desktop / OpenCode config:
+Add to Claude Desktop / OpenCode / Cursor config:
 
 ```json
 {
@@ -307,7 +333,7 @@ Add to Claude Desktop / OpenCode config:
 | `edgefuzz_audit` | Full API audit — returns Markdown report with crash details, root causes, and curl reproducers |
 | `edgefuzz_quick_check` | Targeted audit of a single endpoint path |
 
-The MCP response includes LLM triage fields (`rootCause`, `confidence`, `triageNotes`) which give the AI agent the information it needs to locate and fix the bug in the codebase.
+The MCP response includes LLM triage fields (`rootCause`, `confidence`, `triageNotes`) so the AI agent can locate and fix the bug in the codebase.
 
 ---
 
@@ -316,16 +342,14 @@ The MCP response includes LLM triage fields (`rootCause`, `confidence`, `triageN
 ```yaml
 - name: Run EdgeFuzz Audit
   run: |
-    npx edgefuzz@latest \
-      http://localhost:8080 \
-      http://localhost:8080/openapi.json \
-      --ci \
+    npx edgefuzz@latest http://localhost:8080 \
+      --spec http://localhost:8080/openapi.json \
       --output edgefuzz-report.json
   env:
-    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # optional, enables triage
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # optional, enables LLM triage
 ```
 
-Exit code 1 if crashes found → PR is blocked. See [`.github/workflows/edgefuzz-action.yml`](.github/workflows/edgefuzz-action.yml) for the full example.
+Exits with code 1 if crashes are found → PR is blocked. `--ci` mode is auto-detected when stdout is not a TTY (always the case in GitHub Actions). See [`.github/workflows/edgefuzz-action.yml`](.github/workflows/edgefuzz-action.yml) for the full example.
 
 ---
 
@@ -356,6 +380,7 @@ PRs welcome. High-impact areas:
 git clone https://github.com/rishuyadav/edgefuzz.git
 cd edgefuzz && npm install && npm run build
 node dist/cli/index.js --help
+node dist/cli/index.js --demo   # verify end-to-end with built-in demo
 ```
 
 ---

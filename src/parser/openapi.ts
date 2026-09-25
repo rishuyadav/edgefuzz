@@ -67,8 +67,15 @@ export async function parseSpec(specPath: string | undefined, targetBaseUrl: str
 
   // Validate this is OpenAPI 3.x
   if (!api.openapi || !api.openapi.startsWith('3.')) {
+    const version = api.openapi ?? api.swagger ?? 'unknown';
+    const isSwagger2 = String(version).startsWith('2.');
+    const migrationHint = isSwagger2
+      ? `\n\n  Tip: Convert your Swagger 2.0 spec to OpenAPI 3.x:\n` +
+        `    Online:  https://editor.swagger.io → File → Convert to OpenAPI 3\n` +
+        `    CLI:     npx swagger2openapi your-spec.yaml -o openapi3.yaml`
+      : '';
     throw new Error(
-      `Unsupported spec version: "${api.openapi ?? api.swagger ?? 'unknown'}". EdgeFuzz requires OpenAPI 3.x.`,
+      `Unsupported spec version: "${version}". EdgeFuzz requires OpenAPI 3.x.${migrationHint}`,
     );
   }
 
@@ -89,12 +96,17 @@ export async function parseSpec(specPath: string | undefined, targetBaseUrl: str
 export async function discoverSpec(targetBaseUrl: string): Promise<string> {
   const base = targetBaseUrl.replace(/\/$/, '');
 
+  process.stderr.write(`  Searching for OpenAPI spec at ${base}...\n`);
+
   // If a targetBaseUrl is given, probe its known paths first
   for (const specPath of DISCOVERY_PATHS) {
     const url = `${base}${specPath}`;
     try {
       const found = await probeUrl(url);
-      if (found) return url;
+      if (found) {
+        process.stderr.write(`  Found spec at ${url}\n\n`);
+        return url;
+      }
     } catch {
       // continue probing
     }
@@ -106,7 +118,10 @@ export async function discoverSpec(targetBaseUrl: string): Promise<string> {
       const url = `http://localhost:${port}${specPath}`;
       try {
         const found = await probeUrl(url);
-        if (found) return url;
+        if (found) {
+          process.stderr.write(`  Found spec at ${url}\n\n`);
+          return url;
+        }
       } catch {
         // continue
       }
@@ -114,9 +129,16 @@ export async function discoverSpec(targetBaseUrl: string): Promise<string> {
   }
 
   throw new Error(
-    `Could not auto-discover an OpenAPI spec.\n` +
-      `Probed ${DISCOVERY_PATHS.length} paths across ${DISCOVERY_PORTS.length} localhost ports.\n` +
-      `Tip: Pass the spec URL explicitly: edgefuzz http://localhost:8080/openapi.json`,
+    `Could not auto-discover an OpenAPI spec.\n\n` +
+      `  Probed these paths on ${base}:\n` +
+      DISCOVERY_PATHS.map((p) => `    ${base}${p}`).join('\n') +
+      `\n\n` +
+      `  Is your server running and reachable at ${base}?\n\n` +
+      `  Tip: Provide the spec path explicitly:\n` +
+      `    edgefuzz ${base} --spec ./openapi.yaml\n` +
+      `    edgefuzz ${base} --spec ${base}/openapi.json\n\n` +
+      `  Don't have a server yet? Try the built-in demo:\n` +
+      `    edgefuzz --demo`,
   );
 }
 

@@ -3,9 +3,10 @@
  * EdgeFuzz CLI Entry Point.
  *
  * Usage:
- *   edgefuzz <target-url> [spec-path]
+ *   edgefuzz <target-url> [--spec <path>]
+ *   edgefuzz --demo
  *   edgefuzz --mcp
- *   npx edgefuzz http://localhost:8080 ./openapi.json
+ *   npx edgefuzz http://localhost:8080 --spec ./openapi.json
  */
 
 import { Command } from 'commander';
@@ -40,13 +41,18 @@ program
   )
   .version(VERSION)
   .argument('[target-url]', 'Base URL of the running API server (e.g. http://localhost:8080)')
-  .argument('[spec-path]', 'Path or URL to OpenAPI 3.x spec (auto-discovered if omitted)')
+  .argument('[spec-path]', 'OpenAPI spec path or URL (deprecated positional — prefer --spec)')
+  .option('--demo', 'Start a built-in vulnerable demo API and fuzz it immediately (no setup needed)')
+  .option('--spec <path>', 'Path or URL to OpenAPI 3.x spec (auto-discovered if omitted)')
   .option('--mcp', 'Start as an MCP server (for AI coding agents like Cursor / Claude / OpenCode)')
   .option('-c, --concurrency <n>', 'Max concurrent requests', '20')
   .option('-t, --timeout <ms>', 'Per-request timeout in milliseconds', '5000')
   .option('-o, --output <path>', 'Report output path', 'edgefuzz-report.json')
   .option('--no-report', 'Skip writing the JSON report file')
-  .option('--ci', 'CI mode: plain text output, no TUI (auto-detected if stdout is not a TTY)')
+  .option(
+    '--ci',
+    'Force CI mode: plain text output, no TUI (auto-detected when stdout is not a TTY)',
+  )
   .option(
     '-H, --header <header>',
     'Add a request header (format: "Name: Value"). Can be repeated.',
@@ -77,16 +83,17 @@ program.addHelpText(
   'after',
   `
 Examples:
+  # Try it instantly — no server needed
+  $ edgefuzz --demo
+
   # Auto-discover spec and fuzz localhost
   $ edgefuzz http://localhost:8080
 
-  # Point at a specific spec file
-  $ edgefuzz http://localhost:3000 ./openapi.yaml
+  # Provide spec explicitly (preferred over the old positional form)
+  $ edgefuzz http://localhost:3000 --spec ./openapi.yaml
+  $ edgefuzz http://localhost:8080 --spec http://localhost:8080/openapi.json
 
-  # Point at a remote spec URL
-  $ edgefuzz http://localhost:8080 http://localhost:8080/openapi.json
-
-  # CI mode (no TUI, exits with code 1 if crashes found)
+  # CI mode (plain text, exits with code 1 if crashes found)
   $ edgefuzz http://localhost:8080 --ci
 
   # With auth header
@@ -128,7 +135,9 @@ async function main() {
   program.parse(process.argv);
 
   const opts = program.opts<{
+    demo: boolean;
     mcp: boolean;
+    spec?: string;
     concurrency: string;
     timeout: string;
     output: string;
@@ -149,14 +158,118 @@ async function main() {
     return;
   }
 
-  // ---- Normal CLI mode ----
-  const [targetUrl, specPath] = program.args as [string | undefined, string | undefined];
-
-  if (!targetUrl) {
-    program.help({ error: true });
+  // ---- Demo mode ----
+  if (opts.demo) {
+    await runDemoMode(opts);
     return;
   }
 
+  // ---- Normal CLI mode ----
+  // Support both --spec flag (preferred) and legacy positional second arg
+  const [targetUrl, positionalSpec] = program.args as [string | undefined, string | undefined];
+  const specPath = opts.spec ?? positionalSpec;
+
+  if (!targetUrl) {
+    console.error(
+      '\nNo target URL provided.\n\n' +
+      '  Try the built-in demo first:\n' +
+      '    npx edgefuzz --demo\n\n' +
+      '  Or point at your own server:\n' +
+      '    npx edgefuzz http://localhost:8080\n' +
+      '    npx edgefuzz http://localhost:8080 --spec ./openapi.yaml\n',
+    );
+    process.exit(1);
+    return;
+  }
+
+  // Validate that target URL is a valid HTTP/HTTPS URL
+  try {
+    const parsed = new URL(targetUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('must be http or https');
+    }
+  } catch {
+    console.error(
+      `\nInvalid target URL: "${targetUrl}"\n` +
+      `Expected a full URL, e.g. http://localhost:8080\n`,
+    );
+    process.exit(1);
+  }
+
+  await runFuzzMode({ opts, targetUrl, specPath });
+}
+
+// ---------------------------------------------------------------------------
+// Demo mode — start the built-in vulnerable server and fuzz it
+// ---------------------------------------------------------------------------
+
+async function runDemoMode(opts: Record<string, unknown>): Promise<void> {
+  const { startDemoServer } = await import('../demo/server.js');
+
+  const isCi = (opts['ci'] as boolean | undefined) || !process.stdout.isTTY;
+
+  if (isCi) {
+    console.log('⚡ EdgeFuzz Demo Mode — starting built-in vulnerable API...');
+  } else {
+    process.stderr.write('⚡ EdgeFuzz Demo Mode\n');
+    process.stderr.write('  Starting built-in vulnerable Course Catalog API...\n');
+  }
+
+  const demo = await startDemoServer();
+
+  if (isCi) {
+    console.log(`  Demo server running at ${demo.url}`);
+    console.log(`  OpenAPI spec at ${demo.specUrl}`);
+    console.log('  Fuzzing now...\n');
+  } else {
+    process.stderr.write(`  Running at ${demo.url}\n`);
+    process.stderr.write('  Fuzzing now — this takes ~5 seconds\n\n');
+  }
+
+  try {
+    await runFuzzMode({
+      opts: {
+        ...(opts as Parameters<typeof runFuzzMode>[0]['opts']),
+        ci: (opts['ci'] as boolean | undefined) ?? false,
+        concurrency: (opts['concurrency'] as string | undefined) ?? '20',
+        timeout: (opts['timeout'] as string | undefined) ?? '5000',
+        output: (opts['output'] as string | undefined) ?? 'edgefuzz-report.json',
+        report: (opts['report'] as boolean | undefined) ?? true,
+        header: (opts['header'] as string[] | undefined) ?? [],
+        triage: (opts['triage'] as boolean | undefined) ?? true,
+      },
+      targetUrl: demo.url,
+      specPath: demo.specUrl,
+    });
+  } finally {
+    await demo.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Core fuzz execution — shared by demo and normal mode
+// ---------------------------------------------------------------------------
+
+interface RunFuzzModeArgs {
+  opts: {
+    concurrency: string;
+    timeout: string;
+    output: string;
+    report: boolean;
+    ci: boolean;
+    header: string[];
+    include?: string;
+    exclude?: string;
+    llm?: string;
+    llmModel?: string;
+    llmMutations?: boolean;
+    triage: boolean;
+  };
+  targetUrl: string;
+  specPath?: string;
+}
+
+async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Promise<void> {
   // Parse headers
   const headers: Record<string, string> = {};
   for (const h of opts.header) {
@@ -212,22 +325,18 @@ async function main() {
 
   const events = runFuzzSessionStream(config);
 
-  let report;
-
   if (config.ci) {
     // CI / non-TTY mode: plain text output
-    await runCiReporter(events);
-    report = null;
+    const { totalCrashes } = await runCiReporter(events);
+    process.exit(totalCrashes > 0 ? 1 : 0);
   } else {
-    report = await renderTui(config, events);
+    const report = await renderTui(config, events);
+    // Exit with code 1 if crashes were found (useful for CI gates)
+    if (report && (report as import('../types/index.js').FuzzReport).summary.totalCrashes > 0) {
+      process.exit(1);
+    }
+    process.exit(0);
   }
-
-  // Exit with code 1 if crashes were found (useful for CI gates)
-  if (report && (report as import('../types/index.js').FuzzReport).summary.totalCrashes > 0) {
-    process.exit(1);
-  }
-
-  process.exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,14 +456,11 @@ function resolveLlmFlags(input: ResolveLlmFlagsInput): ResolvedLlmFlags {
   const llmTriage = requestedTriage && keyPresent;
   const llmMutations = requestedMutations && keyPresent;
 
-  // In static-only mode, print a brief mode note to stderr so it's clear
-  // what is running. Omit in CI to avoid polluting structured log output.
-  if (!keyPresent && !isCi) {
-    process.stderr.write(
-      '  EdgeFuzz: running in static-only mode (no LLM key detected)\n' +
-        '            Set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable LLM features.\n\n',
-    );
-  }
+  // Only mention LLM availability if the user explicitly requested LLM features
+  // but no key was found. Silent static-only runs should stay silent — repeated
+  // "set OPENAI_API_KEY" hints on every invocation are noise for intentional
+  // static-mode users (e.g. CI pipelines that deliberately don't pass a key).
+  // The --llm-mutations warning above already covers the explicit-request case.
 
   return { llmMutations, llmTriage };
 }

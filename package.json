@@ -1,6 +1,6 @@
 {
   "name": "edgefuzz",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Zero-config adversarial API fuzzer that finds unhandled 500 crashes in your REST APIs before they hit production",
   "keywords": [
     "api",
