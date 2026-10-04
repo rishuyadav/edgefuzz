@@ -4,11 +4,19 @@
  * A deliberately vulnerable HTTP API used by `edgefuzz --demo`.
  * Exposes a Course Catalog API with intentional bugs that EdgeFuzz finds:
  *
- *   - Integer overflow: POST /courses — quantity field crashes on MAX_INT
- *   - Missing null check: GET /courses/:id — crashes on non-numeric id
- *   - Prototype pollution: PATCH /courses/:id — unsafe object merge
- *   - Missing input validation: POST /enroll — userId accepts null/special chars
- *   - SQL-injection-like: GET /courses?search= — unsanitised string eval
+ * Static-rule bugs (found without LLM):
+ *   - Integer overflow: POST /courses — capacity crashes on MAX_INT
+ *   - Type crash: POST /courses — tags.join() on non-array
+ *   - Missing null check: GET /courses/:id — NaN id → undefined.title crash
+ *   - Prototype pollution: PATCH /courses/:id — unsafe Object.assign
+ *   - Null byte crash: POST /enroll — userId.includes('\x00') with null userId
+ *   - SQL-injection-like: GET /courses?search= — unsanitised RegExp eval
+ *
+ * LLM-exclusive bug (only found with --llm-mutations):
+ *   - Promo code crash: POST /enroll — promoCode field crashes on realistic
+ *     coupon-like strings (e.g. "FREESHIP", "ADMIN", "EXPIRED2023").
+ *     Static rules send "", null, "\x00" — never plausible promo strings.
+ *     LLM generates domain-aware values that match the crash pattern.
  *
  * Uses Node's built-in `http` module only — zero extra dependencies.
  */
@@ -190,13 +198,21 @@ const OPENAPI_SPEC = {
                 properties: {
                   courseId: { type: 'integer' },
                   userId: { type: 'string', minLength: 1 },
-                  promoCode: { type: 'string' },
+                  promoCode: {
+                    type: 'string',
+                    description: 'Optional promotional or discount code applied at enrollment. Supported formats: percentage codes (e.g. SAVE10), free-shipping codes (e.g. FREESHIP), referral codes, and seasonal promo codes.',
+                  },
                 },
               },
             },
           },
         },
-        responses: { '200': { description: 'Enrolled' } },
+        responses: {
+          '200': { description: 'Enrolled' },
+          '400': { description: 'Invalid input' },
+          '404': { description: 'Course not found' },
+          '409': { description: 'Course is full' },
+        },
       },
     },
     '/stats': {
@@ -341,6 +357,7 @@ function handleEnroll(body: unknown, res: http.ServerResponse): void {
   const data = body as Record<string, unknown>;
   const courseId = data['courseId'] as number;
   const userId = data['userId'] as string;
+  const promoCode = data['promoCode'] as string | undefined;
 
   // BUG: crashes if userId contains null bytes or is not a string
   if (userId.includes('\x00')) {
@@ -351,6 +368,19 @@ function handleEnroll(body: unknown, res: http.ServerResponse): void {
   if (userId.trim() === '') {
     json(res, 400, { error: 'userId cannot be empty' });
     return;
+  }
+
+  // BUG (LLM-exclusive): discount engine crashes on realistic promo code patterns.
+  // The regex matches coupon-like strings with uppercase letters or years —
+  // exactly what an LLM generates for a "promoCode" field ("FREESHIP", "ADMIN",
+  // "EXPIRED2023", "100PCT", "SAVE50", "REFERRAL_XYZ").
+  // Static rules send: "", null, "\x00", random bytes — none match.
+  if (promoCode && typeof promoCode === 'string' && /[A-Z]{3,}|20\d{2}/i.test(promoCode)) {
+    throw new Error(
+      `DiscountEngine error: unrecognised promo code format "${promoCode}" — ` +
+      `code lookup failed (database connection to promo-svc timed out). ` +
+      `Stack: DiscountService.apply (discount.js:142) → EnrollHandler.post (enroll.js:67)`,
+    );
   }
 
   const course = courses.find((c) => c.id === courseId);

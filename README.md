@@ -137,38 +137,78 @@ After fuzzing completes, pass `--triage` to have the LLM read each crash's respo
 
 ## Demo Output
 
-### Static mode
-```
- EdgeFuzz v1.0.0  |  target: http://localhost:8080
-─────────────────────────────────────────────────────────
- Progress  ████████████████████  420/420 (100%)
- Speed     138 req/s    Elapsed  3.0s
-─────────────────────────────────────────────────────────
- ✗ Found 2 unhandled crashes:
+Run `npx edgefuzz --demo` to see this live. With an LLM key set, the demo auto-enables semantic mutations and crash triage to showcase the full pipeline.
 
- 1. POST /api/v1/orders
-    ├─ Mutation   Field "quantity": MAX_INT + 1 (64-bit overflow)
-    ├─ Result     HTTP 500  severity: medium
-    └─ Reproducer: curl -i -X POST -H 'Content-Type: application/json' \
-         -d '{"quantity":9223372036854775808}' 'http://localhost:8080/api/v1/orders'
+### Static mode (no key needed)
+```
+⚡ EdgeFuzz Demo Mode  [static mode]
+  Starting built-in vulnerable Course Catalog API...
+  Tip: set OPENAI_API_KEY or ANTHROPIC_API_KEY to see LLM features.
+  Running at http://127.0.0.1:54321
+  Fuzzing now — this takes ~5 seconds
+
+⚡ EdgeFuzz  |  http://127.0.0.1:54321  |  static-only mode
+██████████████████████████████  100%  375/375
+Speed  142 req/s    Elapsed  2.6s    Crashes  8
+
+✗ Found 8 crashes:
+
+1. POST /courses
+   ├─ Mutation   Field "capacity": MAX_INT + 1 (64-bit overflow)
+   ├─ Result     HTTP 500  severity: medium
+   └─ Reproducer: curl -i -X POST -H 'Content-Type: application/json' \
+        -d '{"title":"x","instructor":"x","capacity":9223372036854775808,"price":10}' \
+        'http://127.0.0.1:54321/courses'
+
+2. POST /enroll
+   ├─ Mutation   Field "userId": null value
+   ├─ Result     HTTP 500  severity: high
+   └─ Reproducer: curl -i -X POST -H 'Content-Type: application/json' \
+        -d '{"courseId":1,"userId":null}' 'http://127.0.0.1:54321/enroll'
 ```
 
-### LLM-augmented mode (`--llm-mutations`)
-```
- EdgeFuzz v1.0.0  |  target: http://localhost:8080  |  LLM✓ +24 semantic
-─────────────────────────────────────────────────────────────────────────
- Progress  ████████████████████  444/444 (100%)
-─────────────────────────────────────────────────────────────────────────
- ✗ Found 3 unique crashes (+1 duplicate root cause):
+### LLM-augmented mode (`OPENAI_API_KEY=sk-... npx edgefuzz --demo`)
 
- 1. POST /api/v1/orders  [LLM payload]
-    ├─ Mutation   [LLM] Expired promotional coupon code
-    ├─ Result     HTTP 500  severity: high (LLM override)
-    ├─ Root cause sql-error  (confidence: 91%)
-    ├─ Analysis   The server passes the coupon field directly into an SQL
-    │             query without validation, causing a parse error on special chars.
-    └─ Reproducer: curl -i -X POST -d '{"quantity":1,"coupon":"EXPIRED'\''19"}' ...
+With a key set, the demo auto-enables `--llm-mutations` and `--triage`:
+
 ```
+⚡ EdgeFuzz Demo Mode  [LLM mode]
+  LLM key detected — semantic mutations + crash triage auto-enabled.
+  Starting built-in vulnerable Course Catalog API...
+  Running at http://127.0.0.1:54321
+  Fuzzing now — this takes ~15 seconds
+
+  Generating semantic mutations via LLM for 7 endpoints...
+
+⚡ EdgeFuzz  |  http://127.0.0.1:54321  |  LLM✓  +42 semantic
+██████████████████████████████  100%  417/417
+Speed  138 req/s    Elapsed  3.0s    Crashes  9
+
+  Triaging 9 crashes — classifying root causes + grouping duplicates...
+
+✗ Found 9 crashes (2 duplicates grouped):
+
+1. POST /enroll  [LLM payload]
+   ├─ Mutation   [LLM] Realistic promo code: "FREESHIP" applied at enrollment
+   ├─ Result     HTTP 500  severity: high
+   ├─ Root cause unhandled-exception  (confidence: 96%)
+   ├─ Analysis   DiscountEngine crashes on alphabetic promo codes — the lookup
+   │             service times out and the exception propagates unhandled.
+   └─ Reproducer: curl -i -X POST -H 'Content-Type: application/json' \
+        -d '{"courseId":1,"userId":"user-1","promoCode":"FREESHIP"}' \
+        'http://127.0.0.1:54321/enroll'
+
+2. POST /courses
+   ├─ Mutation   Field "capacity": MAX_INT + 1 (64-bit overflow)
+   ├─ Result     HTTP 500  severity: medium
+   ├─ Root cause integer-overflow  (confidence: 99%)
+   ├─ Analysis   Server performs arithmetic on capacity without bounds checking.
+   └─ Reproducer: curl -i -X POST -H 'Content-Type: application/json' \
+        -d '{"title":"x","instructor":"x","capacity":9223372036854775808,"price":10}' \
+        'http://127.0.0.1:54321/courses'
+```
+
+The `[LLM payload]` crash (`promoCode: "FREESHIP"`) is **only found with `--llm-mutations`**. Static rules send `""`, `null`, `"\x00"` — never a plausible promo code string. The LLM understands the field semantics from the schema description and generates domain-realistic values that expose the bug.
 
 ---
 

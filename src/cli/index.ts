@@ -230,11 +230,44 @@ async function runDemoMode(opts: Record<string, unknown>): Promise<void> {
 
   const isCi = (opts['ci'] as boolean | undefined) || !process.stdout.isTTY;
 
+  // Auto-detect LLM availability. If a key is present (and the user hasn't
+  // explicitly disabled LLM flags), enable both --llm-mutations and --triage
+  // automatically so the demo showcases the full pipeline.
+  // User-supplied flags take precedence: if --llm-mutations was explicitly set
+  // to false, we respect that. Otherwise we auto-enable when a key is found.
+  const llmConfig = detectLLMProvider(
+    opts['llm'] as EdgeFuzzConfig['llmProvider'],
+    opts['llmModel'] as string | undefined,
+    (opts['llmBaseUrl'] ?? process.env['EDGEFUZZ_LLM_BASE_URL']) as string | undefined,
+  );
+  const llmKeyPresent = llmConfig !== null;
+
+  // Auto-enable LLM features in demo mode when a key is available,
+  // unless the user explicitly passed --llm-mutations or --triage already.
+  const autoLlmMutations = llmKeyPresent && !(opts['llmMutations'] === false);
+  const autoTriage = llmKeyPresent && !(opts['triage'] === false);
+
+  const effectiveLlmMutations = (opts['llmMutations'] as boolean | undefined) ?? autoLlmMutations;
+  const effectiveTriage = (opts['triage'] as boolean | undefined) ?? autoTriage;
+
   if (isCi) {
-    console.log('⚡ EdgeFuzz Demo Mode — starting built-in vulnerable API...');
+    if (llmKeyPresent) {
+      console.log('⚡ EdgeFuzz Demo Mode [LLM] — starting built-in vulnerable API...');
+      console.log('  LLM key detected: semantic mutations + crash triage enabled automatically.');
+    } else {
+      console.log('⚡ EdgeFuzz Demo Mode [static] — starting built-in vulnerable API...');
+      console.log('  Tip: set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable LLM features.');
+    }
   } else {
-    process.stderr.write('⚡ EdgeFuzz Demo Mode\n');
-    process.stderr.write('  Starting built-in vulnerable Course Catalog API...\n');
+    if (llmKeyPresent) {
+      process.stderr.write('⚡ EdgeFuzz Demo Mode  \x1b[35m[LLM mode]\x1b[0m\n');
+      process.stderr.write('  LLM key detected — semantic mutations + crash triage auto-enabled.\n');
+      process.stderr.write('  Starting built-in vulnerable Course Catalog API...\n');
+    } else {
+      process.stderr.write('⚡ EdgeFuzz Demo Mode  \x1b[2m[static mode]\x1b[0m\n');
+      process.stderr.write('  Starting built-in vulnerable Course Catalog API...\n');
+      process.stderr.write('  \x1b[2mTip: set OPENAI_API_KEY or ANTHROPIC_API_KEY to see LLM features.\x1b[0m\n');
+    }
   }
 
   const demo = await startDemoServer();
@@ -245,7 +278,8 @@ async function runDemoMode(opts: Record<string, unknown>): Promise<void> {
     console.log('  Fuzzing now...\n');
   } else {
     process.stderr.write(`  Running at ${demo.url}\n`);
-    process.stderr.write('  Fuzzing now — this takes ~5 seconds\n\n');
+    const durationHint = llmKeyPresent ? '~15 seconds' : '~5 seconds';
+    process.stderr.write(`  Fuzzing now — this takes ${durationHint}\n\n`);
   }
 
   try {
@@ -258,6 +292,8 @@ async function runDemoMode(opts: Record<string, unknown>): Promise<void> {
         output: (opts['output'] as string | undefined) ?? 'edgefuzz-report.json',
         report: (opts['report'] as boolean | undefined) ?? true,
         header: (opts['header'] as string[] | undefined) ?? [],
+        llmMutations: effectiveLlmMutations,
+        triage: effectiveTriage,
       },
       targetUrl: demo.url,
       specPath: demo.specUrl,
