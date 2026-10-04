@@ -84,6 +84,16 @@ function isCrash(result: RequestResult): boolean {
   if (result.networkError) {
     const msg = (result.networkErrorMessage ?? '').toLowerCase();
     const code = (result.networkErrorCode ?? '').toUpperCase();
+
+    // Client-side transport failure: the HTTP client itself could not send the request
+    // because the URL or payload exceeded OS/runtime limits. The server never saw the
+    // request, so this is not a server crash triggered by our payload.
+    // Symptoms: UND_ERR_HEADERS_OVERFLOW, UND_ERR_CONNECT_TIMEOUT on an oversized URL,
+    // or any network error on a mutation that generates an extremely large path param.
+    // We detect this by checking whether the mutation id is one of the known
+    // oversized-payload rules applied to a path parameter location.
+    if (isOversizedPathParamMutation(result.request.mutationId)) return false;
+
     const isConnectionRefused =
       msg.includes('econnrefused') ||
       msg.includes('connection refused') ||
@@ -138,6 +148,26 @@ function deduplicationKey(result: RequestResult): string {
 
   const raw = `${endpoint.method}:${endpoint.path}:${mutationFamily}:${statusBucket}`;
   return crypto.createHash('sha1').update(raw).digest('hex').slice(0, 12);
+}
+
+/**
+ * Returns true when a mutation is an oversized-payload rule applied to a path
+ * parameter. These generate URLs whose length exceeds what the HTTP client
+ * (undici) or the OS can transmit, causing a client-side network error before
+ * the server ever receives the request. Classifying those as server crashes
+ * would be a false positive.
+ *
+ * Pattern: path-<paramName>-enc-long-string-* or path-<paramName>-enc-long-*
+ */
+function isOversizedPathParamMutation(mutationId: string): boolean {
+  // Oversized encoding mutation IDs as used in the mutator:
+  //   path-<paramName>-enc-long-string-1mb
+  //   path-<paramName>-enc-long-string-repeated-unicode
+  return (
+    mutationId.startsWith('path-') &&
+    (mutationId.includes('-enc-long-string-1mb') ||
+      mutationId.includes('-enc-long-string-repeated-unicode'))
+  );
 }
 
 /**

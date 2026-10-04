@@ -42,9 +42,15 @@ const LEAK_PATTERNS: RegExp[] = [
   /\bSyntaxError:/,                 // Raw JS SyntaxError in response body
   /\bTypeError:/,                   // Raw JS TypeError in response body
   /\bReferenceError:/,              // Raw JS ReferenceError
-  /password["\s]*:/i,               // Password field leaked in error body
-  /secret["\s]*:/i,                 // Secret field leaked in error body
-  /connectionString["\s]*:/i,       // DB connection string
+  // Credential leakage — require the field to be a JSON key followed by a
+  // non-empty string value (not an array, object, or validation error message).
+  // This prevents false positives on .NET validation errors like:
+  //   "$.password": ["The JSON value could not be converted..."]
+  // where "password" is a JSON path reference, not a leaked credential value.
+  // Pattern breakdown: ["']?<field>["']?\s*:\s*["']<6+ non-quote chars>["']
+  /["']?password["']?\s*:\s*["'][^"']{6,}["']/i,
+  /["']?secret["']?\s*:\s*["'][^"']{6,}["']/i,
+  /["']?connectionString["']?\s*:\s*["'][^"']{6,}["']/i,
   /mongodb:\/\//i,                  // MongoDB URI
   /mysql:\/\//i,                    // MySQL URI
   /postgres:\/\//i,                 // Postgres URI
