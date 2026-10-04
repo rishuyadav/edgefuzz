@@ -197,6 +197,11 @@ async function callOpenAITriage(prompt: string, config: LLMConfig): Promise<stri
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: config.apiKey, ...(config.baseUrl ? { baseURL: config.baseUrl } : {}) });
 
+  // response_format: json_object is an OpenAI-native feature not supported by all proxies
+  // (e.g. LiteLLM routing to Claude). When a custom baseUrl is set, omit it and rely on
+  // the system prompt instruction instead to avoid an API error.
+  const extraParams = config.baseUrl ? {} : { response_format: { type: 'json_object' as const } };
+
   const response = await client.chat.completions.create({
     model: config.model ?? 'gpt-4o-mini',
     messages: [
@@ -207,7 +212,7 @@ async function callOpenAITriage(prompt: string, config: LLMConfig): Promise<stri
       },
       { role: 'user', content: prompt },
     ],
-    response_format: { type: 'json_object' },
+    ...extraParams,
     temperature: 0.1,   // Low temperature — triage needs consistent, deterministic output
     max_tokens: 4096,
   });
@@ -277,10 +282,20 @@ interface RawTriageResult {
   severityOverride?: unknown;
 }
 
+/**
+ * Strip markdown code fences that some LLMs (e.g. Claude via LiteLLM) wrap around JSON responses.
+ * Handles ```json ... ``` and ``` ... ``` blocks.
+ */
+function stripMarkdownFences(raw: string): string {
+  const trimmed = raw.trim();
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
+  return fenceMatch ? fenceMatch[1]!.trim() : trimmed;
+}
+
 function parseTriageResponse(raw: string, crashes: CrashFinding[]): CrashTriageResult[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(stripMarkdownFences(raw));
   } catch {
     process.stderr.write('[EdgeFuzz] Triage: LLM returned invalid JSON\n');
     return [];

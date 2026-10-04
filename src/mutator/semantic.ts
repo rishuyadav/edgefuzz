@@ -217,6 +217,11 @@ async function callOpenAIStructured(prompt: string, config: LLMConfig): Promise<
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: config.apiKey, ...(config.baseUrl ? { baseURL: config.baseUrl } : {}) });
 
+  // response_format: json_object is OpenAI-native and not supported by all proxies
+  // (e.g. LiteLLM routing to Claude). When a custom baseUrl is set, omit it and rely on
+  // the system prompt instruction instead.
+  const extraParams = config.baseUrl ? {} : { response_format: { type: 'json_object' as const } };
+
   const response = await client.chat.completions.create({
     model: config.model ?? 'gpt-4o-mini',
     messages: [
@@ -227,7 +232,7 @@ async function callOpenAIStructured(prompt: string, config: LLMConfig): Promise<
       },
       { role: 'user', content: prompt },
     ],
-    response_format: { type: 'json_object' },
+    ...extraParams,
     temperature: 0.7,       // Higher temp = more creative/diverse payloads
     max_tokens: 2048,
   });
@@ -286,10 +291,20 @@ async function callAnthropicStructured(prompt: string, config: LLMConfig): Promi
 // Response validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Strip markdown code fences that some LLMs (e.g. Claude via LiteLLM) wrap around JSON responses.
+ * Handles ```json ... ``` and ``` ... ``` blocks.
+ */
+function stripMarkdownFences(raw: string): string {
+  const trimmed = raw.trim();
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
+  return fenceMatch ? fenceMatch[1]!.trim() : trimmed;
+}
+
 function parseAndValidate(raw: string, endpoint: ParsedEndpoint): SemanticMutation[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(stripMarkdownFences(raw));
   } catch {
     process.stderr.write(`[EdgeFuzz] LLM returned invalid JSON for ${endpoint.method} ${endpoint.path}\n`);
     return [];

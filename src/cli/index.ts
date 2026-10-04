@@ -355,21 +355,28 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
     authCommand: opts.authCommand,
     tlsInsecure: opts.tlsInsecure === true,
     requestDelay: requestDelay > 0 ? requestDelay : undefined,
+    skipResponseValidation: opts.responseValidation === false,
   };
 
   const events = runFuzzSessionStream(config);
 
-  if (config.ci) {
-    // CI / non-TTY mode: plain text output
-    const { totalCrashes } = await runCiReporter(events);
-    process.exit(totalCrashes > 0 ? 1 : 0);
-  } else {
-    const report = await renderTui(config, events);
-    // Exit with code 1 if crashes were found (useful for CI gates)
-    if (report && (report as import('../types/index.js').FuzzReport).summary.totalCrashes > 0) {
-      process.exit(1);
+  try {
+    if (config.ci) {
+      // CI / non-TTY mode: plain text output
+      const { totalCrashes } = await runCiReporter(events);
+      process.exit(totalCrashes > 0 ? 1 : 0);
+    } else {
+      const report = await renderTui(config, events);
+      // Exit with code 1 if crashes were found (useful for CI gates)
+      if (report && (report as import('../types/index.js').FuzzReport).summary.totalCrashes > 0) {
+        process.exit(1);
+      }
+      process.exit(0);
     }
-    process.exit(0);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n[EdgeFuzz] Fatal: ${msg}`);
+    process.exit(1);
   }
 }
 

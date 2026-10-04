@@ -141,12 +141,15 @@ export async function runFuzzSession(
       }
 
       // Response contract validation (wrong types, missing fields, data leakage)
-      const mismatches = analyseResponse(result);
-      for (const m of mismatches) {
-        if (!seenMismatchIds.has(m.id)) {
-          seenMismatchIds.add(m.id);
-          allMismatches.push(m);
-          emit({ type: 'mismatch_found', mismatch: m });
+      // Skipped when --no-response-validation is set
+      if (!config.skipResponseValidation) {
+        const mismatches = analyseResponse(result);
+        for (const m of mismatches) {
+          if (!seenMismatchIds.has(m.id)) {
+            seenMismatchIds.add(m.id);
+            allMismatches.push(m);
+            emit({ type: 'mismatch_found', mismatch: m });
+          }
         }
       }
     },
@@ -215,11 +218,20 @@ export async function* runFuzzSessionStream(
     resolve = null;
   };
 
-  const sessionPromise = runFuzzSession(config, push).then(() => {
-    done = true;
-    resolve?.();
-    resolve = null;
-  });
+  let sessionError: unknown = undefined;
+  const sessionPromise = runFuzzSession(config, push).then(
+    () => {
+      done = true;
+      resolve?.();
+      resolve = null;
+    },
+    (err) => {
+      sessionError = err;
+      done = true;
+      resolve?.();
+      resolve = null;
+    },
+  );
 
   while (true) {
     if (buffer.length > 0) {
@@ -234,4 +246,7 @@ export async function* runFuzzSessionStream(
   }
 
   await sessionPromise;
+  if (sessionError !== undefined) {
+    throw sessionError;
+  }
 }

@@ -63,7 +63,22 @@ export async function parseSpec(specPath: string | undefined, targetBaseUrl: str
 
   // swagger-parser validates and fully dereferences $ref chains
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const api = (await SwaggerParser.dereference(rawSpec as any)) as any;
+  let api: any;
+  try {
+    api = (await SwaggerParser.dereference(rawSpec as any)) as any;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // swagger-parser only supports 3.0.0–3.0.3; surface a friendly message for newer patch versions
+    if (msg.includes('Unsupported OpenAPI version')) {
+      const versionMatch = msg.match(/version:\s*([\d.]+)/);
+      const detected = versionMatch ? versionMatch[1] : 'unknown';
+      throw new Error(
+        `Your spec uses OpenAPI ${detected}, which is newer than what the bundled parser supports (3.0.0–3.0.3).\n` +
+        `  Workaround: change "openapi: '${detected}'" to "openapi: '3.0.3'" in your spec — it is backwards-compatible.`,
+      );
+    }
+    throw err;
+  }
 
   // Validate this is OpenAPI 3.x
   if (!api.openapi || !api.openapi.startsWith('3.')) {

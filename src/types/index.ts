@@ -382,6 +382,13 @@ export interface EdgeFuzzConfig {
    * Default: 0 (no delay).
    */
   requestDelay?: number;
+  /**
+   * Disable response schema validation.
+   * When true, mismatches are not collected and the response validator is skipped entirely.
+   * Use --no-response-validation for crash-only mode (faster, lower noise).
+   * Default: false (validation enabled).
+   */
+  skipResponseValidation?: boolean;
 }
 
 // ---------------------------------------------------------------------------
