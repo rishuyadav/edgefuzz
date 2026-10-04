@@ -19,15 +19,22 @@ export interface ReportInput {
   llmMutationCount: number;
   llmEnabled: boolean;
   durationMs: number;
+  /** Whether --triage was used; if true, totalDuplicates is computed and included */
+  triageEnabled?: boolean;
 }
 
 /**
  * Build the structured FuzzReport object from a completed fuzzing session.
  */
 export function buildReport(input: ReportInput): FuzzReport {
-  const { spec, crashes, mismatches, totalRequests, llmMutationCount, llmEnabled, durationMs } = input;
+  const { spec, crashes, mismatches, totalRequests, llmMutationCount, llmEnabled, durationMs, triageEnabled } = input;
   const requestsPerSecond =
     durationMs > 0 ? Math.round((totalRequests / durationMs) * 1000) : 0;
+
+  // totalDuplicates is only computed and included when --triage was used
+  const totalDuplicates = triageEnabled
+    ? crashes.filter((c) => c.duplicateOf !== undefined).length
+    : undefined;
 
   return {
     version: '1',
@@ -41,6 +48,7 @@ export function buildReport(input: ReportInput): FuzzReport {
       totalCrashes: crashes.length,
       totalMismatches: mismatches.length,
       llmMutations: llmMutationCount,
+      ...(totalDuplicates !== undefined ? { totalDuplicates } : {}),
       durationMs,
       requestsPerSecond,
     },

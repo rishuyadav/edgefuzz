@@ -7,6 +7,7 @@
  * Phases:
  *  preparing  → LLM generating semantic mutations (if --llm-mutations)
  *  running    → Fuzzing in progress
+ *  triaging   → LLM crash triage (if --triage and crashes > 0)
  *  done       → Summary + crash details
  */
 
@@ -25,7 +26,7 @@ interface DashboardProps {
   events: AsyncIterable<ProgressEvent>;
 }
 
-type Phase = 'preparing' | 'running' | 'done';
+type Phase = 'preparing' | 'running' | 'triaging' | 'done';
 
 // ---------------------------------------------------------------------------
 // Root component
@@ -44,6 +45,7 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
   const [llmEnabled, setLlmEnabled] = useState(false);
   const [llmMutationCount, setLlmMutationCount] = useState(0);
   const [preparingEndpoints, setPreparingEndpoints] = useState(0);
+  const [triagingCount, setTriagingCount] = useState(0);
 
   const startTimeRef = useRef(Date.now());
   const doneRef = useRef(0);
@@ -88,6 +90,15 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
             });
             break;
 
+          case 'triage_start':
+            setTriagingCount(event.crashCount);
+            setPhase('triaging');
+            break;
+
+          case 'triage_done':
+            // Phase transitions to 'done' when the 'done' event arrives
+            break;
+
           case 'done':
             clearInterval(timer);
             setReport(event.report);
@@ -104,6 +115,10 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
 
   if (phase === 'preparing') {
     return <PreparingView endpointCount={preparingEndpoints} />;
+  }
+
+  if (phase === 'triaging') {
+    return <TriagingView crashCount={triagingCount} />;
   }
 
   if (phase === 'running') {
@@ -147,6 +162,34 @@ function PreparingView({ endpointCount }: { endpointCount: number }) {
       <Box marginTop={1}>
         <Text dimColor>
           The LLM is reading each endpoint schema and generating domain-specific adversarial payloads...
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Triaging view (LLM crash triage — post-fuzzing, opt-in via --triage)
+// ---------------------------------------------------------------------------
+
+function TriagingView({ crashCount }: { crashCount: number }) {
+  return (
+    <Box flexDirection="column" paddingX={1} paddingY={1}>
+      <Box marginBottom={1}>
+        <Text bold color="cyan">⚡ EdgeFuzz</Text>
+        <Text dimColor>  —  LLM triage</Text>
+      </Box>
+      <Box gap={2}>
+        <Spinner type="dots" />
+        <Text>
+          Triaging{' '}
+          <Text bold color="yellow">{crashCount}</Text>{' '}
+          crash{crashCount !== 1 ? 'es' : ''} — classifying root causes + grouping duplicates
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text dimColor>
+          Batched at 20 crashes per LLM call. Results will appear in the final report...
         </Text>
       </Box>
     </Box>
@@ -280,6 +323,9 @@ function SummaryView({ report, crashes }: { report: FuzzReport; crashes: CrashFi
         <Box flexDirection="column">
           <Text bold color="red">
             ✗ Found {crashes.length} crash{crashes.length !== 1 ? 'es' : ''}
+            {report.summary.totalDuplicates !== undefined && report.summary.totalDuplicates > 0 && (
+              <Text color="magenta"> ({report.summary.totalDuplicates} duplicate{report.summary.totalDuplicates !== 1 ? 's' : ''} grouped)</Text>
+            )}
           </Text>
           <Newline />
           {crashes.map((crash, i) => (
@@ -287,6 +333,7 @@ function SummaryView({ report, crashes }: { report: FuzzReport; crashes: CrashFi
               <Text bold>
                 {i + 1}. {crash.endpoint.method} {crash.endpoint.path}
                 {crash.mutationSource === 'llm' && <Text color="magenta"> [LLM payload]</Text>}
+                {crash.duplicateOf && <Text dimColor> [dup]</Text>}
               </Text>
               <CrashRow crash={crash} compact={false} />
             </Box>
@@ -330,6 +377,8 @@ function CrashRow({ crash, compact }: { crash: CrashFinding; compact: boolean })
     );
   }
 
+  const effectiveSeverity = crash.llmSeverity ?? crash.severity;
+
   return (
     <Box flexDirection="column" paddingLeft={2}>
       <Box>
@@ -340,8 +389,23 @@ function CrashRow({ crash, compact }: { crash: CrashFinding; compact: boolean })
         <Text dimColor>├─ Result     </Text>
         <Text color={severityColor}>{statusLabel}</Text>
         <Text dimColor>  severity: </Text>
-        <Text color={severityColor}>{crash.severity}</Text>
+        <Text color={severityColor}>{effectiveSeverity}</Text>
       </Box>
+      {crash.rootCause && (
+        <Box>
+          <Text dimColor>├─ Root cause </Text>
+          <Text color="magenta">{crash.rootCause}</Text>
+          {crash.confidence !== undefined && (
+            <Text dimColor>  ({Math.round(crash.confidence * 100)}% confidence)</Text>
+          )}
+        </Box>
+      )}
+      {crash.triageNotes && (
+        <Box>
+          <Text dimColor>├─ Analysis  </Text>
+          <Text dimColor>{truncate(crash.triageNotes, 90)}</Text>
+        </Box>
+      )}
       {crash.responseBody && (
         <Box>
           <Text dimColor>├─ Response  </Text>

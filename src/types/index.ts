@@ -156,6 +156,40 @@ export interface RequestResult {
 
 export type CrashSeverity = 'critical' | 'high' | 'medium' | 'low';
 
+/**
+ * Root cause labels assigned by the LLM triage engine (Phase C).
+ * This is a closed enum — the LLM is constrained to these values only.
+ */
+export type CrashRootCause =
+  | 'integer-overflow'
+  | 'null-pointer'
+  | 'type-coercion'
+  | 'unhandled-exception'
+  | 'sql-error'
+  | 'nosql-error'
+  | 'encoding-error'
+  | 'validation-missing'
+  | 'timeout-hang'
+  | 'memory-error'
+  | 'auth-bypass'
+  | 'path-traversal'
+  | 'injection'
+  | 'schema-mismatch'
+  | 'unknown';
+
+/**
+ * Intermediate triage result returned by the LLM for one crash.
+ * Applied in-place to the CrashFinding via applyTriageResults().
+ */
+export interface CrashTriageResult {
+  crashId: string;
+  rootCause: CrashRootCause;
+  confidence: number; // 0.0–1.0
+  notes: string;
+  duplicateOf?: string; // id of another crash with the same root cause
+  severityOverride?: CrashSeverity;
+}
+
 export interface CrashFinding {
   /** Dedup key — same endpoint + mutation rule = same crash */
   id: string;
@@ -177,6 +211,18 @@ export interface CrashFinding {
   triggeringPayload: unknown;
   /** Ready-to-run curl command that reproduces the crash */
   curlReproducer: string;
+
+  // --- LLM triage fields (populated only when --triage is used) ---
+  /** LLM-classified root cause */
+  rootCause?: CrashRootCause;
+  /** LLM confidence score for the root cause (0.0–1.0) */
+  confidence?: number;
+  /** 1-2 sentence LLM explanation of the crash */
+  triageNotes?: string;
+  /** ID of another crash that shares the same underlying bug */
+  duplicateOf?: string;
+  /** LLM-overridden severity (when response body reveals more than static rules could) */
+  llmSeverity?: CrashSeverity;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +283,11 @@ export interface FuzzReport {
     totalMismatches: number;
     /** How many mutations were LLM-generated (0 if --llm-mutations not set) */
     llmMutations: number;
+    /**
+     * Number of crashes identified as duplicates of another crash by LLM triage.
+     * Only present when --triage was used (undefined otherwise).
+     */
+    totalDuplicates?: number;
     durationMs: number;
     requestsPerSecond: number;
   };
@@ -310,6 +361,16 @@ export interface EdgeFuzzConfig {
    * Default: false (validation enabled).
    */
   skipResponseValidation?: boolean;
+  /**
+   * Enable LLM crash triage (Phase C) after fuzzing completes.
+   * Sends all deduplicated crashes to the LLM in batches of 20 for:
+   *  - Root cause classification (closed enum, not free text)
+   *  - Cross-crash duplicate detection
+   *  - Optional severity override when response body reveals more than static rules
+   * Default: false (triage disabled — opt-in only via --triage flag).
+   * Requires OPENAI_API_KEY or ANTHROPIC_API_KEY (same as --llm-mutations).
+   */
+  llmTriage?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,4 +384,6 @@ export type ProgressEvent =
   | { type: 'request_done'; result: RequestResult }
   | { type: 'crash_found'; crash: CrashFinding }
   | { type: 'mismatch_found'; mismatch: ResponseMismatch }
+  | { type: 'triage_start'; crashCount: number }
+  | { type: 'triage_done'; duplicateCount: number }
   | { type: 'done'; report: FuzzReport };

@@ -96,6 +96,23 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
         break;
       }
 
+      case 'triage_start':
+        process.stdout.write('\n');
+        console.log(
+          chalk.magenta(`[triage] Analysing ${event.crashCount} crash${event.crashCount !== 1 ? 'es' : ''} with LLM — classifying root causes + grouping duplicates...`),
+        );
+        break;
+
+      case 'triage_done':
+        if (event.duplicateCount > 0) {
+          console.log(
+            chalk.magenta(`[triage] Done — ${event.duplicateCount} duplicate${event.duplicateCount !== 1 ? 's' : ''} identified`),
+          );
+        } else {
+          console.log(chalk.magenta('[triage] Done — no duplicates detected'));
+        }
+        break;
+
       case 'done':
         process.stdout.write('\n');
         printCiSummary(event.report, crashes, mismatches);
@@ -123,6 +140,9 @@ function printCiSummary(report: FuzzReport, crashes: CrashFinding[], mismatches:
   if (summary.llmMutations > 0) {
     console.log(chalk.dim(`LLM mutations: ${summary.llmMutations}`));
   }
+  if (summary.totalDuplicates !== undefined) {
+    console.log(chalk.dim(`Duplicates identified: ${summary.totalDuplicates}`));
+  }
 
   if (crashes.length === 0 && mismatches.length === 0) {
     console.log(chalk.green('✓ No crashes or contract violations found.'));
@@ -146,10 +166,18 @@ function printCiSummary(report: FuzzReport, crashes: CrashFinding[], mismatches:
       console.log(
         chalk.bold(`${i + 1}. ${crash.endpoint.method} ${crash.endpoint.path}`) +
           chalk.red(` → ${statusLabel}`) +
-          chalk.dim(` [severity: ${crash.severity}]`) +
-          (source ? chalk.magenta(source) : ''),
+          chalk.dim(` [severity: ${crash.llmSeverity ?? crash.severity}]`) +
+          (source ? chalk.magenta(source) : '') +
+          (crash.duplicateOf ? chalk.dim(` [dup of ${crash.duplicateOf.slice(0, 8)}...]`) : ''),
       );
       console.log(chalk.dim(`   Mutation : ${crash.mutationLabel}`));
+      if (crash.rootCause) {
+        const conf = crash.confidence !== undefined ? ` (${Math.round(crash.confidence * 100)}% confidence)` : '';
+        console.log(chalk.dim(`   Root cause: ${crash.rootCause}${conf}`));
+      }
+      if (crash.triageNotes) {
+        console.log(chalk.dim(`   Analysis : ${crash.triageNotes}`));
+      }
       console.log(chalk.dim('   Reproducer:'));
       console.log(chalk.cyan(`   ${crash.curlReproducer.replace(/\s*\\\n\s*/g, ' ')}`));
       console.log();

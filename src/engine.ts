@@ -1,13 +1,14 @@
 /**
  * EdgeFuzz Core Engine.
  *
- * Orchestrates all five pipeline stages and emits ProgressEvents
+ * Orchestrates all pipeline stages and emits ProgressEvents
  * for consumption by the TUI or CI reporter.
  *
  *   Stage 1: Parse OpenAPI spec
  *   Stage 2: Generate mutations (static always, +LLM semantic if --llm-mutations)
  *   Stage 3: Execute requests concurrently
  *   Stage 4: Analyse and deduplicate crashes
+ *   Stage 4b: LLM crash triage (opt-in via --triage, only when crashes > 0)
  *   Stage 5: Generate reports (JSON)
  */
 
@@ -16,6 +17,7 @@ import { generateMutations } from './mutator/index.js';
 import { executeRequests } from './runner/executor.js';
 import { analyseCrash, deduplicateFindings } from './analyzer/crash.js';
 import { analyseResponse } from './analyzer/response.js';
+import { triageCrashes } from './analyzer/triage.js';
 import { buildReport, writeReport } from './reporter/json.js';
 import { detectLLMProvider } from './reporter/llm.js';
 import { TokenProvider } from './auth/token-provider.js';
@@ -160,6 +162,23 @@ export async function runFuzzSession(
   const dedupedCrashes = deduplicateFindings(allCrashes);
 
   // ------------------------------------------------------------------
+  // Stage 4b: LLM crash triage (opt-in — only when --triage is set)
+  // ------------------------------------------------------------------
+  // Key guardrails vs. the old always-on design:
+  //   1. Only runs if --triage flag was explicitly passed
+  //   2. Only runs if there are actual crashes (no LLM call on clean runs)
+  //   3. Crashes pre-sorted by endpoint path inside triageCrashes() to improve
+  //      duplicateOf detection accuracy
+  const useLlmTriage = config.llmTriage === true && llmEnabled && dedupedCrashes.length > 0;
+
+  if (useLlmTriage && llmConfig) {
+    emit({ type: 'triage_start', crashCount: dedupedCrashes.length });
+    await triageCrashes(dedupedCrashes, llmConfig);
+    const duplicateCount = dedupedCrashes.filter((c) => c.duplicateOf !== undefined).length;
+    emit({ type: 'triage_done', duplicateCount });
+  }
+
+  // ------------------------------------------------------------------
   // Stage 5: Build report
   // ------------------------------------------------------------------
   const durationMs = Date.now() - startTime;
@@ -172,6 +191,7 @@ export async function runFuzzSession(
     llmMutationCount,
     llmEnabled,
     durationMs,
+    triageEnabled: useLlmTriage,
   });
 
   if (config.reportPath !== false) {

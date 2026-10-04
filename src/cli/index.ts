@@ -75,6 +75,10 @@ program
     'Enable LLM-generated semantic mutations. Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
   )
   .option(
+    '--triage',
+    'Enable LLM crash triage after fuzzing: root cause classification + duplicate grouping (batched, not per-crash). Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
+  )
+  .option(
     '--auth-command <cmd>',
     'Shell command that prints a bearer token (or JSON with "token" field). Re-run on 401.',
   )
@@ -111,6 +115,12 @@ Examples:
   # LLM-augmented mode: semantic mutations on top of static rules
   $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --llm-mutations
 
+  # LLM crash triage: root cause + duplicate grouping after fuzzing (batched, opt-in)
+  $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --triage
+
+  # Full LLM mode: mutations + triage
+  $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --llm-mutations --triage
+
   # Auth: run a command to fetch a token (re-run automatically on 401)
   $ edgefuzz http://localhost:8080 --auth-command 'curl -s -X POST https://auth.example.com/token -d "client_id=x&client_secret=y" | jq -r .access_token'
   $ edgefuzz http://localhost:8080 --auth-command 'echo $MY_API_KEY'
@@ -124,6 +134,8 @@ Examples:
 LLM Modes:
   Static only (default):  no key needed — hardcoded adversarial rules
   + Mutations (opt-in):   --llm-mutations → LLM generates semantic payloads too
+  + Triage (opt-in):      --triage → LLM classifies root causes + groups duplicates
+                          (batched at 20 crashes/call; 0 calls if no crashes found)
 
 Environment variables:
   OPENAI_API_KEY          Enable LLM features via OpenAI (gpt-4o-mini by default)
@@ -155,6 +167,7 @@ async function main() {
     llm?: string;
     llmModel?: string;
     llmMutations?: boolean;
+    triage?: boolean;
     authCommand?: string;
     tlsInsecure?: boolean;
     delay?: string;
@@ -271,6 +284,7 @@ interface RunFuzzModeArgs {
     llm?: string;
     llmModel?: string;
     llmMutations?: boolean;
+    triage?: boolean;
     authCommand?: string;
     tlsInsecure?: boolean;
     delay?: string;
@@ -315,8 +329,9 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
 
   // Resolve LLM availability and emit actionable warnings for misconfigurations.
   // This runs before building EdgeFuzzConfig so the config always reflects reality.
-  const { llmMutations } = resolveLlmFlags({
+  const { llmMutations, llmTriage } = resolveLlmFlags({
     requestedMutations: opts.llmMutations === true,
+    requestedTriage: opts.triage === true,
     providerOverride: opts.llm as EdgeFuzzConfig['llmProvider'],
     modelOverride: opts.llmModel,
     isCi: opts.ci || !process.stdout.isTTY,
@@ -336,6 +351,7 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
     llmModel: opts.llmModel,
     llmBaseUrl: (opts as Record<string, unknown>)['llmBaseUrl'] as string | undefined,
     llmMutations,
+    llmTriage,
     authCommand: opts.authCommand,
     tlsInsecure: opts.tlsInsecure === true,
     requestDelay: requestDelay > 0 ? requestDelay : undefined,
@@ -434,6 +450,7 @@ async function renderTui(
 
 interface ResolveLlmFlagsInput {
   requestedMutations: boolean;
+  requestedTriage: boolean;
   providerOverride?: EdgeFuzzConfig['llmProvider'];
   modelOverride?: string;
   isCi: boolean;
@@ -441,6 +458,7 @@ interface ResolveLlmFlagsInput {
 
 interface ResolvedLlmFlags {
   llmMutations: boolean;
+  llmTriage: boolean;
 }
 
 /**
@@ -448,11 +466,12 @@ interface ResolvedLlmFlags {
  * the final effective values, emitting clear warnings for misconfigurations.
  *
  * Rules:
- *  - If no key is detected, llmMutations is forced to false.
- *  - If --llm-mutations is passed but no key is found, a warning is printed.
+ *  - If no key is detected, llmMutations and llmTriage are forced to false.
+ *  - If --llm-mutations or --triage is passed but no key is found, a warning is printed.
+ *  - --triage is independent of --llm-mutations (can be used alone with just a key).
  */
 function resolveLlmFlags(input: ResolveLlmFlagsInput): ResolvedLlmFlags {
-  const { requestedMutations, providerOverride, modelOverride } = input;
+  const { requestedMutations, requestedTriage, providerOverride, modelOverride } = input;
 
   const llmConfig = detectLLMProvider(providerOverride, modelOverride);
   const keyPresent = llmConfig !== null;
@@ -469,9 +488,22 @@ function resolveLlmFlags(input: ResolveLlmFlagsInput): ResolvedLlmFlags {
     process.stderr.write(warning + '\n');
   }
 
-  const llmMutations = requestedMutations && keyPresent;
+  // --triage requested but no key available
+  if (requestedTriage && !keyPresent) {
+    const warning = [
+      '',
+      '  Warning: --triage requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
+      '           No key found — triage will be skipped.',
+      '           Set one of those environment variables to enable LLM triage.',
+      '',
+    ].join('\n');
+    process.stderr.write(warning + '\n');
+  }
 
-  return { llmMutations };
+  const llmMutations = requestedMutations && keyPresent;
+  const llmTriage = requestedTriage && keyPresent;
+
+  return { llmMutations, llmTriage };
 }
 
 // ---------------------------------------------------------------------------
