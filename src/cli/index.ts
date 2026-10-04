@@ -77,7 +77,14 @@ program
   .option(
     '--no-triage',
     'Disable LLM crash triage (Phase C). Triage runs by default when a key is present.',
-  );
+  )
+  .option(
+    '--auth-command <cmd>',
+    'Shell command that prints a bearer token (or JSON with "token" field). Re-run on 401.',
+  )
+  .option('--tls-insecure', 'Skip TLS certificate verification (for self-signed certs in dev/staging)')
+  .option('--delay <ms>', 'Delay between requests in ms — prevents rate limiting (default: 0)')
+  .option('--no-response-validation', 'Disable response schema validation (faster, crash-only mode)');
 
 program.addHelpText(
   'after',
@@ -113,6 +120,16 @@ Examples:
 
   # Disable triage even when key is present
   $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --no-triage
+
+  # Auth: run a command to fetch a token (re-run automatically on 401)
+  $ edgefuzz http://localhost:8080 --auth-command 'curl -s -X POST https://auth.example.com/token -d "client_id=x&client_secret=y" | jq -r .access_token'
+  $ edgefuzz http://localhost:8080 --auth-command 'echo $MY_API_KEY'
+
+  # Dev/staging: skip TLS cert verification
+  $ edgefuzz https://localhost:8443 --tls-insecure
+
+  # Rate-limited API: add 50ms delay between requests
+  $ edgefuzz http://localhost:8080 --delay 50
 
 LLM Modes:
   Static only (default):  no key needed — hardcoded adversarial rules
@@ -150,6 +167,10 @@ async function main() {
     llmModel?: string;
     llmMutations?: boolean;
     triage: boolean; // commander uses --no-triage → opts.triage = false
+    authCommand?: string;
+    tlsInsecure?: boolean;
+    delay?: string;
+    responseValidation?: boolean; // --no-response-validation → false
   }>();
 
   // ---- MCP mode ----
@@ -196,7 +217,7 @@ async function main() {
     process.exit(1);
   }
 
-  await runFuzzMode({ opts, targetUrl, specPath });
+  await runFuzzMode({ opts: opts as Parameters<typeof runFuzzMode>[0]['opts'], targetUrl, specPath });
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +285,10 @@ interface RunFuzzModeArgs {
     llmModel?: string;
     llmMutations?: boolean;
     triage: boolean;
+    authCommand?: string;
+    tlsInsecure?: boolean;
+    delay?: string;
+    responseValidation?: boolean; // commander --no-response-validation → false
   };
   targetUrl: string;
   specPath?: string;
@@ -296,6 +321,12 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
     process.exit(1);
   }
 
+  const requestDelay = opts.delay ? parseInt(opts.delay, 10) : 0;
+  if (isNaN(requestDelay) || requestDelay < 0) {
+    console.error('Delay must be a non-negative integer (milliseconds).');
+    process.exit(1);
+  }
+
   // Resolve LLM availability and emit actionable warnings for misconfigurations.
   // This runs before building EdgeFuzzConfig so the config always reflects reality.
   const { llmMutations, llmTriage } = resolveLlmFlags({
@@ -321,6 +352,9 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
     llmBaseUrl: (opts as Record<string, unknown>)['llmBaseUrl'] as string | undefined,
     llmMutations,
     llmTriage,
+    authCommand: opts.authCommand,
+    tlsInsecure: opts.tlsInsecure === true,
+    requestDelay: requestDelay > 0 ? requestDelay : undefined,
   };
 
   const events = runFuzzSessionStream(config);

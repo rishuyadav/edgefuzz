@@ -8,6 +8,7 @@
 import { request as undiciRequest } from 'undici';
 import pLimit from 'p-limit';
 import type { MutatedRequest, RequestResult } from '../types/index.js';
+import type { TokenProvider } from '../auth/token-provider.js';
 
 const RAW_JSON_PREFIX = '__RAW_JSON__:';
 
@@ -15,6 +16,12 @@ export interface ExecutorOptions {
   concurrency: number;
   timeoutMs: number;
   onResult: (result: RequestResult) => void;
+  /** Auth token provider — injects Authorization header and handles 401 refresh */
+  tokenProvider?: TokenProvider;
+  /** Skip TLS certificate verification (for self-signed certs in dev/staging) */
+  tlsInsecure?: boolean;
+  /** Delay in ms between requests (for rate-limited APIs) */
+  requestDelay?: number;
 }
 
 /**
@@ -28,13 +35,41 @@ export async function executeRequests(
   requests: MutatedRequest[],
   options: ExecutorOptions,
 ): Promise<RequestResult[]> {
-  const { concurrency, timeoutMs, onResult } = options;
+  const { concurrency, timeoutMs, onResult, tokenProvider, tlsInsecure, requestDelay } = options;
   const limit = pLimit(concurrency);
   const results: RequestResult[] = [];
 
+  // Pre-fetch the token once before the run starts — avoids 401 on first batch
+  if (tokenProvider) {
+    await tokenProvider.getToken();
+  }
+
   const tasks = requests.map((req) =>
     limit(async () => {
-      const result = await executeOne(req, timeoutMs);
+      // Optional per-request delay (helps with rate-limited APIs)
+      if (requestDelay && requestDelay > 0) {
+        await sleep(requestDelay);
+      }
+
+      // Inject auth header if provider is configured
+      const finalReq = tokenProvider
+        ? { ...req, headers: { ...req.headers, Authorization: await tokenProvider.getAuthHeader() } }
+        : req;
+
+      let result = await executeOne(finalReq, timeoutMs, tlsInsecure);
+
+      // On 401: refresh token once and retry
+      if (result.statusCode === 401 && tokenProvider) {
+        const refreshed = await tokenProvider.handleUnauthorized();
+        if (refreshed) {
+          const retryReq = {
+            ...finalReq,
+            headers: { ...finalReq.headers, Authorization: `Bearer ${refreshed}` },
+          };
+          result = await executeOne(retryReq, timeoutMs, tlsInsecure);
+        }
+      }
+
       results.push(result);
       onResult(result);
       return result;
@@ -45,11 +80,19 @@ export async function executeRequests(
   return results;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ---------------------------------------------------------------------------
 // Single request execution
 // ---------------------------------------------------------------------------
 
-async function executeOne(req: MutatedRequest, timeoutMs: number): Promise<RequestResult> {
+async function executeOne(
+  req: MutatedRequest,
+  timeoutMs: number,
+  tlsInsecure?: boolean,
+): Promise<RequestResult> {
   const startTime = Date.now();
 
   try {
@@ -63,6 +106,7 @@ async function executeOne(req: MutatedRequest, timeoutMs: number): Promise<Reque
       body: bodyStr ?? undefined,
       bodyTimeout: timeoutMs,
       headersTimeout: timeoutMs,
+      ...(tlsInsecure ? { connect: { rejectUnauthorized: false } } : {}),
     });
 
     const latencyMs = Date.now() - startTime;

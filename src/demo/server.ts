@@ -55,7 +55,23 @@ const OPENAPI_SPEC = {
           { name: 'search', in: 'query', schema: { type: 'string' } },
           { name: 'maxPrice', in: 'query', schema: { type: 'integer', minimum: 0 } },
         ],
-        responses: { '200': { description: 'OK' } },
+        responses: {
+          '200': {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['courses', 'total'],
+                  properties: {
+                    courses: { type: 'array', items: { type: 'object', required: ['id', 'title', 'instructor', 'capacity', 'enrolled', 'price'], properties: { id: { type: 'integer' }, title: { type: 'string' }, instructor: { type: 'string' }, capacity: { type: 'integer' }, enrolled: { type: 'integer' }, price: { type: 'number' }, tags: { type: 'array', items: { type: 'string' } } } } },
+                    total: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       post: {
         operationId: 'createCourse',
@@ -78,7 +94,28 @@ const OPENAPI_SPEC = {
             },
           },
         },
-        responses: { '201': { description: 'Created' } },
+        responses: {
+          '201': {
+            description: 'Created',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['id', 'title', 'instructor', 'capacity', 'enrolled', 'price'],
+                  properties: {
+                    id: { type: 'integer' },
+                    title: { type: 'string' },
+                    instructor: { type: 'string' },
+                    capacity: { type: 'integer' },
+                    enrolled: { type: 'integer' },
+                    price: { type: 'number' },
+                    tags: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     },
     '/courses/{id}': {
@@ -86,7 +123,29 @@ const OPENAPI_SPEC = {
         operationId: 'getCourse',
         summary: 'Get a course by ID',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } },
+        responses: {
+          '200': {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['id', 'title', 'instructor', 'capacity', 'enrolled', 'price'],
+                  properties: {
+                    id: { type: 'integer' },
+                    title: { type: 'string' },
+                    instructor: { type: 'string' },
+                    capacity: { type: 'integer' },
+                    enrolled: { type: 'integer' },
+                    price: { type: 'number' },
+                    tags: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+          '404': { description: 'Not found' },
+        },
       },
       patch: {
         operationId: 'updateCourse',

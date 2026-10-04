@@ -265,6 +265,7 @@ function extractEndpoints(api: any): ParsedEndpoint[] {
         summary: op.summary,
         parameters,
         requestBody: extractRequestBody(op.requestBody),
+        responseSchemas: extractResponseSchemas(op.responses),
       };
 
       endpoints.push(endpoint);
@@ -326,6 +327,27 @@ function extractRequestBody(rawBody: any): ParsedEndpoint['requestBody'] | undef
     contentType,
     schema: normalizeSchema(mediaObj.schema ?? {}),
   };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractResponseSchemas(responses: any): Record<string, import('../types/index.js').JsonSchema> | undefined {
+  if (!responses || typeof responses !== 'object') return undefined;
+  const result: Record<string, import('../types/index.js').JsonSchema> = {};
+  let found = false;
+
+  for (const [statusCode, responseObj] of Object.entries(responses)) {
+    if (!responseObj || typeof responseObj !== 'object') continue;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ro = responseObj as any;
+    const content = ro.content ?? {};
+    const mediaObj = content['application/json'] ?? content[Object.keys(content)[0] ?? ''];
+    if (mediaObj?.schema) {
+      result[statusCode] = normalizeSchema(mediaObj.schema);
+      found = true;
+    }
+  }
+
+  return found ? result : undefined;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

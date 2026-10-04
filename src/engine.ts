@@ -16,12 +16,15 @@ import { parseSpec } from './parser/openapi.js';
 import { generateMutations } from './mutator/index.js';
 import { executeRequests } from './runner/executor.js';
 import { analyseCrash, deduplicateFindings } from './analyzer/crash.js';
+import { analyseResponse } from './analyzer/response.js';
 import { buildReport, writeReport } from './reporter/json.js';
 import { detectLLMProvider } from './reporter/llm.js';
+import { TokenProvider } from './auth/token-provider.js';
 import type {
   EdgeFuzzConfig,
   ProgressEvent,
   CrashFinding,
+  ResponseMismatch,
   FuzzReport,
 } from './types/index.js';
 
@@ -45,6 +48,11 @@ export async function runFuzzSession(
   // Detect LLM availability once — used across multiple stages
   const llmConfig = detectLLMProvider(config.llmProvider, config.llmModel, config.llmBaseUrl);
   const llmEnabled = llmConfig !== null;
+
+  // Initialise auth token provider if --auth-command is configured
+  const tokenProvider = config.authCommand
+    ? new TokenProvider(config.authCommand)
+    : undefined;
 
   // ------------------------------------------------------------------
   // Stage 1: Parse spec
@@ -111,19 +119,35 @@ export async function runFuzzSession(
   // Stage 3: Execute concurrently
   // ------------------------------------------------------------------
   const allCrashes: CrashFinding[] = [];
-  const seenIds = new Set<string>();
+  const allMismatches: ResponseMismatch[] = [];
+  const seenCrashIds = new Set<string>();
+  const seenMismatchIds = new Set<string>();
 
   await executeRequests(mutations, {
     concurrency: config.concurrency,
     timeoutMs: config.timeoutMs,
+    tokenProvider,
+    tlsInsecure: config.tlsInsecure,
+    requestDelay: config.requestDelay,
     onResult: (result) => {
       emit({ type: 'request_done', result });
 
+      // Crash detection (5xx / timeout / network error)
       const crash = analyseCrash(result);
-      if (crash && !seenIds.has(crash.id)) {
-        seenIds.add(crash.id);
+      if (crash && !seenCrashIds.has(crash.id)) {
+        seenCrashIds.add(crash.id);
         allCrashes.push(crash);
         emit({ type: 'crash_found', crash });
+      }
+
+      // Response contract validation (wrong types, missing fields, data leakage)
+      const mismatches = analyseResponse(result);
+      for (const m of mismatches) {
+        if (!seenMismatchIds.has(m.id)) {
+          seenMismatchIds.add(m.id);
+          allMismatches.push(m);
+          emit({ type: 'mismatch_found', mismatch: m });
+        }
       }
     },
   });
@@ -154,6 +178,7 @@ export async function runFuzzSession(
   const report = buildReport({
     spec: filteredSpec,
     crashes: dedupedCrashes,
+    mismatches: allMismatches,
     totalRequests: mutations.length,
     llmMutationCount,
     llmEnabled,

@@ -6,12 +6,13 @@
  */
 
 import chalk from 'chalk';
-import type { ProgressEvent, CrashFinding, FuzzReport } from '../types/index.js';
+import type { ProgressEvent, CrashFinding, ResponseMismatch, FuzzReport } from '../types/index.js';
 
 export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promise<{ totalCrashes: number }> {
   let totalRequests = 0;
   let doneRequests = 0;
   const crashes: CrashFinding[] = [];
+  const mismatches: ResponseMismatch[] = [];
 
   console.log(chalk.cyan('⚡ EdgeFuzz') + chalk.dim(' — CI mode'));
   console.log(chalk.dim('─'.repeat(60)));
@@ -79,6 +80,22 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
         break;
       }
 
+      case 'mismatch_found': {
+        const m = event.mismatch;
+        if (!mismatches.find((x) => x.id === m.id)) {
+          mismatches.push(m);
+          // Only print high-severity mismatches inline to avoid flooding CI logs
+          if (m.severity === 'high' || m.kind === 'error-body-leaked') {
+            process.stdout.write('\n');
+            console.log(
+              chalk.yellow(`[LEAK] ${m.endpoint.method} ${m.endpoint.path}`) +
+                chalk.dim(` → HTTP ${m.statusCode} — ${m.kind}`),
+            );
+          }
+        }
+        break;
+      }
+
       case 'triage_start':
         process.stdout.write('\n');
         console.log(
@@ -97,7 +114,7 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
 
       case 'done':
         process.stdout.write('\n');
-        printCiSummary(event.report, crashes);
+        printCiSummary(event.report, crashes, mismatches);
         break;
     }
   }
@@ -105,7 +122,7 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
   return { totalCrashes: crashes.filter((c) => !c.duplicateOf).length };
 }
 
-function printCiSummary(report: FuzzReport, crashes: CrashFinding[]): void {
+function printCiSummary(report: FuzzReport, crashes: CrashFinding[], mismatches: ResponseMismatch[]): void {
   const { summary } = report;
 
   console.log(chalk.dim('─'.repeat(60)));
@@ -123,9 +140,13 @@ function printCiSummary(report: FuzzReport, crashes: CrashFinding[]): void {
     console.log(chalk.dim(`LLM mutations: ${summary.llmMutations}`));
   }
 
+  if (crashes.length === 0 && mismatches.length === 0) {
+    console.log(chalk.green('✓ No crashes or contract violations found.'));
+    return;
+  }
+
   if (crashes.length === 0) {
     console.log(chalk.green('✓ No unhandled crashes found.'));
-    return;
   }
 
   // Separate primary from duplicates
@@ -169,6 +190,36 @@ function printCiSummary(report: FuzzReport, crashes: CrashFinding[]): void {
     console.log(chalk.dim('   Reproducer:'));
     console.log(chalk.cyan(`   ${crash.curlReproducer.replace(/\s*\\\n\s*/g, ' ')}`));
     console.log();
+  }
+
+  // Contract violation summary
+  if (mismatches.length > 0) {
+    const highMismatches = mismatches.filter((m) => m.severity === 'high' || m.kind === 'error-body-leaked');
+    const otherMismatches = mismatches.filter((m) => m.severity !== 'high' && m.kind !== 'error-body-leaked');
+
+    console.log(
+      chalk.yellow(
+        `\n⚠ Found ${mismatches.length} contract violation${mismatches.length !== 1 ? 's' : ''}` +
+          ` (wrong types, missing fields, data leakage):\n`,
+      ),
+    );
+
+    for (const m of highMismatches) {
+      console.log(
+        chalk.bold(`  ${m.endpoint.method} ${m.endpoint.path}`) +
+          chalk.yellow(` → ${m.kind}`) +
+          chalk.dim(` [severity: ${m.severity}]`),
+      );
+      console.log(chalk.dim(`   ${m.message}`));
+      if (m.responseExcerpt) {
+        console.log(chalk.dim(`   Body: ${m.responseExcerpt.slice(0, 120)}...`));
+      }
+      console.log();
+    }
+
+    if (otherMismatches.length > 0) {
+      console.log(chalk.dim(`  (+${otherMismatches.length} lower-severity violations — see report)`));
+    }
   }
 
   console.log(chalk.dim(`Report: ${chalk.cyan('edgefuzz-report.json')}`));

@@ -27,6 +27,11 @@ export interface ParsedEndpoint {
     contentType: string;
     schema: JsonSchema;
   };
+  /**
+   * Response schemas keyed by HTTP status code string (e.g. "200", "201", "default").
+   * Used for response schema validation after each request.
+   */
+  responseSchemas?: Record<string, JsonSchema>;
 }
 
 export interface ParsedSpec {
@@ -246,6 +251,44 @@ export interface CrashFinding {
 }
 
 // ---------------------------------------------------------------------------
+// Response mismatch / contract violation types
+// ---------------------------------------------------------------------------
+
+export type MismatchKind =
+  | 'missing-required-field'   // response body omits a field marked required in the spec
+  | 'wrong-type'               // field present but wrong JSON type vs spec
+  | 'error-body-leaked'        // non-2xx body contains stack trace / internal details
+  | 'undocumented-status'      // server returned a status code not in the spec's responses
+  | 'empty-success-body';      // 200/201 returned empty body when schema expects an object
+
+/**
+ * A response that violates the API contract documented in the OpenAPI spec.
+ * These are not crashes (no 500) but indicate bugs or data leakage.
+ */
+export interface ResponseMismatch {
+  /** Unique ID for deduplication (hash of endpoint key + mismatch kind + field) */
+  id: string;
+  kind: MismatchKind;
+  severity: CrashSeverity;
+  endpoint: ParsedEndpoint;
+  mutationId: string;
+  mutationLabel: string;
+  statusCode: number;
+  /** Human-readable description of what was expected vs. what was received */
+  message: string;
+  /** The field path that was wrong, e.g. "user.email" (undefined for whole-body mismatches) */
+  fieldPath?: string;
+  /** The actual JSON value received (may be undefined/missing) */
+  actualValue?: unknown;
+  /** The expected JSON type from the spec */
+  expectedType?: string;
+  /** Excerpt of the response body (for error-body-leaked cases) */
+  responseExcerpt?: string;
+  /** Ready-to-run curl command that reproduces the mismatch */
+  curlReproducer: string;
+}
+
+// ---------------------------------------------------------------------------
 // Report types
 // ---------------------------------------------------------------------------
 
@@ -263,12 +306,16 @@ export interface FuzzReport {
     totalCrashes: number;
     /** Crashes that are LLM-confirmed duplicates (same root cause) */
     totalDuplicates: number;
+    /** Total response contract violations detected */
+    totalMismatches: number;
     /** How many mutations were LLM-generated (0 if --llm-mutations not set) */
     llmMutations: number;
     durationMs: number;
     requestsPerSecond: number;
   };
   crashes: CrashFinding[];
+  /** Response contract violations (wrong types, missing fields, data leakage) */
+  mismatches: ResponseMismatch[];
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +363,25 @@ export interface EdgeFuzzConfig {
   includePaths?: string[];
   /** Skip endpoints matching these path prefixes */
   excludePaths?: string[];
+  /**
+   * Shell command to run to obtain a bearer token.
+   * Output must be either a plain string (the token) or JSON with a "token" field.
+   * Re-run automatically on 401 responses (once per run) to handle token expiry.
+   * Example: 'curl -s -X POST https://auth.example.com/token -d "client_id=..." | jq -r .access_token'
+   */
+  authCommand?: string;
+  /**
+   * Skip TLS certificate verification.
+   * Use for dev/staging servers with self-signed certificates.
+   * Default: false (certificates are verified).
+   */
+  tlsInsecure?: boolean;
+  /**
+   * Delay between requests in milliseconds.
+   * Useful for APIs with rate limiting. Applied per-request before execution.
+   * Default: 0 (no delay).
+   */
+  requestDelay?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +394,7 @@ export type ProgressEvent =
   | { type: 'llm_mutations_ready'; count: number }
   | { type: 'request_done'; result: RequestResult }
   | { type: 'crash_found'; crash: CrashFinding }
+  | { type: 'mismatch_found'; mismatch: ResponseMismatch }
   | { type: 'triage_start'; crashCount: number }
   | { type: 'triage_done'; crashes: CrashFinding[] }
   | { type: 'done'; report: FuzzReport };

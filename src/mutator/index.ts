@@ -133,23 +133,30 @@ function mutateEndpointStatic(endpoint: ParsedEndpoint, baseUrl: string): Mutate
       );
     }
 
-    // Encoding mutations on all string fields
+    // Encoding mutations — distributed across ALL string fields, not just the first.
+    //
+    // Strategy: round-robin assignment so each mutation type is tested on at
+    // least one field, and every field receives a representative subset.
+    // Total requests = encodingMutations().length (same as before, regardless
+    // of how many string fields the schema has — no combinatorial explosion).
     if (schema.properties) {
       const stringFields = Object.entries(schema.properties).filter(
         ([, s]) => resolveType(s) === 'string',
       );
       if (stringFields.length > 0) {
         const encMutations = encodingMutations();
-        const [firstField] = stringFields[0]!;
-        for (const enc of encMutations) {
+        for (let i = 0; i < encMutations.length; i++) {
+          const enc = encMutations[i]!;
+          // Rotate: mutation i goes to field i % numFields
+          const [fieldName] = stringFields[i % stringFields.length]!;
           const body = {
             ...(isObject(validPayload) ? validPayload : {}),
-            [firstField]: enc.value,
+            [fieldName]: enc.value,
           };
           requests.push(
             makeRequest(endpoint, baseUrl, baseHeaders, {
-              mutationId: `body-enc-${firstField}-${enc.id}`,
-              mutationLabel: `Encoding "${firstField}": ${enc.label}`,
+              mutationId: `body-enc-${fieldName}-${enc.id}`,
+              mutationLabel: `Encoding "${fieldName}": ${enc.label}`,
               mutationCategory: 'encoding',
               body,
             }),
@@ -225,9 +232,17 @@ function mutateEndpointStatic(endpoint: ParsedEndpoint, baseUrl: string): Mutate
 
     for (const mutation of allParamMutations) {
       const baseQParams = buildBaseQueryParams(queryParams, param.name);
+      // For object-type values (e.g. NoSQL injection `{ $gt: "" }`), serialize
+      // to JSON string so it arrives as a valid parameter value rather than
+      // the useless "[object Object]" coercion.
+      const rawVal = mutation.value ?? 'null';
+      const paramStr =
+        typeof rawVal === 'object' && rawVal !== null
+          ? JSON.stringify(rawVal)
+          : String(rawVal);
       const qParamsWithMutation = {
         ...baseQParams,
-        [param.name]: String(mutation.value ?? 'null'),
+        [param.name]: paramStr,
       };
       requests.push(
         makeRequest(endpoint, baseUrl, baseHeaders, {

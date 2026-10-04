@@ -9,11 +9,12 @@
 
 import { writeFile } from 'fs/promises';
 import path from 'path';
-import type { FuzzReport, CrashFinding, ParsedSpec } from '../types/index.js';
+import type { FuzzReport, CrashFinding, ResponseMismatch, ParsedSpec } from '../types/index.js';
 
 export interface ReportInput {
   spec: ParsedSpec;
   crashes: CrashFinding[];
+  mismatches: ResponseMismatch[];
   totalRequests: number;
   llmMutationCount: number;
   llmEnabled: boolean;
@@ -24,7 +25,7 @@ export interface ReportInput {
  * Build the structured FuzzReport object from a completed fuzzing session.
  */
 export function buildReport(input: ReportInput): FuzzReport {
-  const { spec, crashes, totalRequests, llmMutationCount, llmEnabled, durationMs } = input;
+  const { spec, crashes, mismatches, totalRequests, llmMutationCount, llmEnabled, durationMs } = input;
   const requestsPerSecond =
     durationMs > 0 ? Math.round((totalRequests / durationMs) * 1000) : 0;
 
@@ -41,11 +42,13 @@ export function buildReport(input: ReportInput): FuzzReport {
       totalEndpoints: spec.endpoints.length,
       totalCrashes: crashes.length,
       totalDuplicates,
+      totalMismatches: mismatches.length,
       llmMutations: llmMutationCount,
       durationMs,
       requestsPerSecond,
     },
     crashes,
+    mismatches,
   };
 }
 
