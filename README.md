@@ -4,9 +4,10 @@
 
 Point it at any OpenAPI 3.x server — no config files, no API key, no setup. Fires 70+ adversarial mutations per endpoint and gives you `curl` commands that reproduce every crash.
 
-[![CI](https://github.com/rishuyadav/edgefuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/rishuyadav/edgefuzz/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/edgefuzz)](https://www.npmjs.com/package/edgefuzz)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![EdgeFuzz demo](media/demo.gif)
 
 ---
 
@@ -36,20 +37,23 @@ npx edgefuzz http://localhost:8080
 npx edgefuzz http://localhost:8080 --spec ./openapi.yaml
 npx edgefuzz http://localhost:8080 --spec http://localhost:8080/api-docs
 
-# Add LLM crash triage — automatic when a key is set
-OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080
-
-# Full LLM mode: semantic mutations + crash triage
+# Add LLM semantic mutations (domain-aware payloads)
 OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --llm-mutations
 
+# Add LLM crash triage (root cause + severity after fuzzing)
+OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --triage
+
+# Full LLM mode: semantic mutations + crash triage
+OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --llm-mutations --triage
+
 # Via Anthropic
-ANTHROPIC_API_KEY=sk-ant-... npx edgefuzz http://localhost:8080 --llm-mutations
+ANTHROPIC_API_KEY=sk-ant-... npx edgefuzz http://localhost:8080 --llm-mutations --triage
 
 # Via LiteLLM proxy or any OpenAI-compatible endpoint (Ollama, Azure, etc.)
 EDGEFUZZ_LLM_BASE_URL=http://localhost:4000/v1 \
 OPENAI_API_KEY=<proxy-key> \
 EDGEFUZZ_LLM_MODEL=claude-sonnet-4-5 \
-npx edgefuzz http://localhost:8080 --llm-mutations
+npx edgefuzz http://localhost:8080 --llm-mutations --triage
 ```
 
 **Output:** A live TUI progress bar, crash details with `curl` reproducers, and `edgefuzz-report.json`. Exits with code 1 if crashes are found — CI-friendly.
@@ -85,7 +89,7 @@ EdgeFuzz uses LLMs in two optional phases. **Static rules always run regardless*
 │  Stage 3        │  Concurrent HTTP execution (undici, 100+ req/s)   │
 ├─────────────────┼───────────────────────────────────────────────────┤
 │  Stage 4        │  Crash deduplication (SHA-1 by rule family)       │
-│  LLM Phase 2    │  + LLM crash triage (auto when key present)      │
+│  LLM Phase 2    │  + LLM crash triage (--triage flag, opt-in)      │
 ├─────────────────┼───────────────────────────────────────────────────┤
 │  Stage 5        │  curl reproducers + edgefuzz-report.json          │
 └─────────────────┴───────────────────────────────────────────────────┘
@@ -109,9 +113,9 @@ Static rules cover type-boundary and structural edge cases but can't understand 
 - Capped at 10 semantic mutations per endpoint
 - Degrades gracefully: any LLM failure → static rules still run
 
-### LLM Phase 2 — Crash Triage (automatic when key present)
+### LLM Phase 2 — Crash Triage (`--triage`)
 
-After fuzzing, the LLM reads each crash's response body (stack traces, SQL errors, ORM messages) and returns structured analysis:
+After fuzzing completes, pass `--triage` to have the LLM read each crash's response body (stack traces, SQL errors, ORM messages) and return structured analysis. This is opt-in and only runs if crashes were found — zero LLM calls on a clean audit.
 
 ```json
 {
@@ -214,7 +218,8 @@ Options:
   --llm-model <model>           Override the LLM model name
   --llm-base-url <url>          Custom LLM API base URL (LiteLLM, Ollama, Azure, etc.)
   --llm-mutations               Enable LLM semantic mutations. Requires key.
-  --no-triage                   Disable LLM crash triage
+  --triage                      Enable LLM crash triage after fuzzing. Requires key.
+                                Only runs if crashes are found — zero calls on clean audits.
   -h, --help                    Display help
 ```
 
@@ -244,10 +249,11 @@ edgefuzz http://localhost:8080 --delay 50
 | Mode | Command | What runs |
 |:-----|:--------|:----------|
 | Static only | `edgefuzz http://localhost:8080` | 70+ hardcoded rules, no key needed |
-| + Triage | `OPENAI_API_KEY=... edgefuzz ...` | Static + LLM crash analysis |
-| + Mutations | `OPENAI_API_KEY=... edgefuzz ... --llm-mutations` | Static + LLM payloads + triage |
-| Anthropic | `ANTHROPIC_API_KEY=... edgefuzz ...` | Same as above via Anthropic |
-| Proxy / LiteLLM | `EDGEFUZZ_LLM_BASE_URL=... edgefuzz ...` | Any OpenAI-compatible endpoint |
+| + Triage | `OPENAI_API_KEY=... edgefuzz ... --triage` | Static rules + LLM crash analysis |
+| + Mutations | `OPENAI_API_KEY=... edgefuzz ... --llm-mutations` | Static + LLM domain-aware payloads |
+| Full LLM | `OPENAI_API_KEY=... edgefuzz ... --llm-mutations --triage` | Static + LLM payloads + triage |
+| Anthropic | `ANTHROPIC_API_KEY=... edgefuzz ... --llm-mutations --triage` | Same via Anthropic |
+| Proxy / LiteLLM | `EDGEFUZZ_LLM_BASE_URL=... edgefuzz ... --llm-mutations` | Any OpenAI-compatible endpoint |
 
 ---
 
@@ -391,7 +397,7 @@ The MCP response includes LLM triage fields (`rootCause`, `confidence`, `triageN
       --spec http://localhost:8080/openapi.json \
       --output edgefuzz-report.json
   env:
-    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # optional, enables LLM triage
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # optional: add --triage to enable LLM crash analysis
 ```
 
 Exits with code 1 if crashes are found → PR is blocked. `--ci` mode is auto-detected when stdout is not a TTY (always the case in GitHub Actions). See [`.github/workflows/edgefuzz-action.yml`](.github/workflows/edgefuzz-action.yml) for the full example.
@@ -409,6 +415,49 @@ Exits with code 1 if crashes are found → PR is blocked. `--ci` mode is auto-de
 | 3. Execute | `src/runner/executor.ts` | Concurrent HTTP (undici + p-limit) |
 | 4. Analyze | `src/analyzer/` | Dedup + optional LLM triage (root cause, confidence, cross-crash dedup) |
 | 5. Report | `src/reporter/` | curl reproducers + JSON report |
+
+---
+
+## Limitations
+
+- **Requires OpenAPI 3.x** — Swagger 2.0 / JSON Schema specs are not supported. Use [swagger2openapi](https://www.npmjs.com/package/swagger2openapi) to convert.
+- **REST / HTTP only** — no GraphQL, gRPC, WebSocket, or GraphQL subscriptions support.
+- **Stateless requests** — EdgeFuzz fires each mutation independently. It cannot chain requests (e.g. create → update → delete) or maintain session state between calls.
+- **No Swagger 3.0.4+ strict validation** — OpenAPI 3.0.4 parses with a graceful warning; use 3.0.0–3.0.3 for strict spec compliance.
+- **Self-reported crashes only** — EdgeFuzz detects what the server tells it (5xx, timeouts, network errors). Bugs that silently corrupt data and return 200 are out of scope.
+- **LLM features require a key** — `--triage` and `--llm-mutations` degrade gracefully to static-only mode if no key is found.
+
+---
+
+## Troubleshooting
+
+**Got 0 crashes on an API I know is buggy?**
+- Check that your server is actually returning 5xx and not swallowing errors into 200/400 responses.
+- Run with `--no-response-validation` to see if mismatches are being counted instead.
+- Some servers return 422 for invalid input — that's expected behaviour, not a crash. EdgeFuzz counts 5xx / timeouts / network errors only.
+- If the spec has very strict `enum` or `format` constraints, your server may reject invalid inputs at the validation layer before crashing. This is actually good — it means your server has input validation!
+
+**Spec auto-discovery failed / parse error on startup?**
+- Provide the spec explicitly: `--spec ./path/to/openapi.yaml` or `--spec http://localhost:8080/openapi.json`
+- Auto-discovery tries: `/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/swagger.yaml`, `/api-docs`, `/api/openapi.json`
+- If you get a parse error, check the OpenAPI version — EdgeFuzz requires 3.x. Use `swagger2openapi` to convert from Swagger 2.0.
+
+**All requests are timing out?**
+- Increase the timeout: `--timeout 15000` (15 seconds)
+- Reduce concurrency: `--concurrency 5`
+- Check that your server is actually running and reachable at the target URL
+- If behind a rate limiter: `--delay 200` adds 200ms between each request
+
+**LLM features not activating?**
+- `--llm-mutations` and `--triage` both require an API key set in the environment (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`).
+- LLM errors are non-fatal — EdgeFuzz logs a warning and falls back to static-only mode. Check stderr for the exact error.
+- For LiteLLM / proxy: set `EDGEFUZZ_LLM_BASE_URL` and use `OPENAI_API_KEY` as the proxy token.
+
+**Getting false positive crashes (server-side rate limiting or auth errors)?**
+- Add auth headers: `--header "Authorization: Bearer $TOKEN"`
+- Or use `--auth-command` to auto-refresh tokens on 401.
+- Use `--exclude /admin,/internal` to skip endpoints you don't have access to.
+- Check `edgefuzz-report.json` — each crash includes the HTTP status code and curl reproducer so you can verify manually.
 
 ---
 

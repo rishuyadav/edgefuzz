@@ -5,14 +5,21 @@
   "keywords": [
     "api",
     "fuzzing",
+    "fuzzer",
     "testing",
     "openapi",
+    "swagger",
     "security",
+    "api-security",
+    "penetration-testing",
+    "chaos-testing",
     "cli",
     "mcp",
     "edge-cases",
     "rest",
-    "developer-tools"
+    "developer-tools",
+    "regression-testing",
+    "crash-detection"
   ],
   "homepage": "https://github.com/rishuyadav/edgefuzz#readme",
   "bugs": {
