@@ -8,7 +8,6 @@
  *   Stage 2: Generate mutations (static always, +LLM semantic if --llm-mutations)
  *   Stage 3: Execute requests concurrently
  *   Stage 4: Analyse and deduplicate crashes
- *   Stage 4b: LLM crash triage (if key present and llmTriage enabled)
  *   Stage 5: Generate reports (JSON)
  */
 
@@ -159,19 +158,6 @@ export async function runFuzzSession(
   // Stage 4: Deduplicate
   // ------------------------------------------------------------------
   const dedupedCrashes = deduplicateFindings(allCrashes);
-
-  // ------------------------------------------------------------------
-  // Stage 4b: LLM Crash Triage (Phase C)
-  // ------------------------------------------------------------------
-  if (llmEnabled && config.llmTriage && dedupedCrashes.length > 0) {
-    emit({ type: 'triage_start', crashCount: dedupedCrashes.length });
-
-    // Dynamically import triage to avoid loading it when LLM is disabled
-    const { triageCrashes } = await import('./analyzer/triage.js');
-    await triageCrashes(dedupedCrashes, llmConfig!);
-
-    emit({ type: 'triage_done', crashes: dedupedCrashes });
-  }
 
   // ------------------------------------------------------------------
   // Stage 5: Build report

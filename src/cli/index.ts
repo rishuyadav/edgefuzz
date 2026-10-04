@@ -72,11 +72,7 @@ program
   )
   .option(
     '--llm-mutations',
-    'Enable LLM-generated semantic mutations (Phase A). Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
-  )
-  .option(
-    '--no-triage',
-    'Disable LLM crash triage (Phase C). Triage runs by default when a key is present.',
+    'Enable LLM-generated semantic mutations. Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.',
   )
   .option(
     '--auth-command <cmd>',
@@ -112,14 +108,8 @@ Examples:
   # Only fuzz /api/v1 endpoints
   $ edgefuzz http://localhost:8080 --include /api/v1
 
-  # LLM-augmented mode: semantic mutations + crash triage
+  # LLM-augmented mode: semantic mutations on top of static rules
   $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --llm-mutations
-
-  # LLM triage only (no semantic mutations, just root-cause analysis of crashes)
-  $ ANTHROPIC_API_KEY=sk-ant-... edgefuzz http://localhost:8080
-
-  # Disable triage even when key is present
-  $ OPENAI_API_KEY=sk-... edgefuzz http://localhost:8080 --no-triage
 
   # Auth: run a command to fetch a token (re-run automatically on 401)
   $ edgefuzz http://localhost:8080 --auth-command 'curl -s -X POST https://auth.example.com/token -d "client_id=x&client_secret=y" | jq -r .access_token'
@@ -133,7 +123,6 @@ Examples:
 
 LLM Modes:
   Static only (default):  no key needed — hardcoded adversarial rules
-  + Triage (auto):        key present → LLM classifies crashes by root cause
   + Mutations (opt-in):   --llm-mutations → LLM generates semantic payloads too
 
 Environment variables:
@@ -166,7 +155,6 @@ async function main() {
     llm?: string;
     llmModel?: string;
     llmMutations?: boolean;
-    triage: boolean; // commander uses --no-triage → opts.triage = false
     authCommand?: string;
     tlsInsecure?: boolean;
     delay?: string;
@@ -257,7 +245,6 @@ async function runDemoMode(opts: Record<string, unknown>): Promise<void> {
         output: (opts['output'] as string | undefined) ?? 'edgefuzz-report.json',
         report: (opts['report'] as boolean | undefined) ?? true,
         header: (opts['header'] as string[] | undefined) ?? [],
-        triage: (opts['triage'] as boolean | undefined) ?? true,
       },
       targetUrl: demo.url,
       specPath: demo.specUrl,
@@ -284,7 +271,6 @@ interface RunFuzzModeArgs {
     llm?: string;
     llmModel?: string;
     llmMutations?: boolean;
-    triage: boolean;
     authCommand?: string;
     tlsInsecure?: boolean;
     delay?: string;
@@ -329,9 +315,8 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
 
   // Resolve LLM availability and emit actionable warnings for misconfigurations.
   // This runs before building EdgeFuzzConfig so the config always reflects reality.
-  const { llmMutations, llmTriage } = resolveLlmFlags({
+  const { llmMutations } = resolveLlmFlags({
     requestedMutations: opts.llmMutations === true,
-    requestedTriage: opts.triage !== false,
     providerOverride: opts.llm as EdgeFuzzConfig['llmProvider'],
     modelOverride: opts.llmModel,
     isCi: opts.ci || !process.stdout.isTTY,
@@ -351,7 +336,6 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
     llmModel: opts.llmModel,
     llmBaseUrl: (opts as Record<string, unknown>)['llmBaseUrl'] as string | undefined,
     llmMutations,
-    llmTriage,
     authCommand: opts.authCommand,
     tlsInsecure: opts.tlsInsecure === true,
     requestDelay: requestDelay > 0 ? requestDelay : undefined,
@@ -450,7 +434,6 @@ async function renderTui(
 
 interface ResolveLlmFlagsInput {
   requestedMutations: boolean;
-  requestedTriage: boolean;
   providerOverride?: EdgeFuzzConfig['llmProvider'];
   modelOverride?: string;
   isCi: boolean;
@@ -458,7 +441,6 @@ interface ResolveLlmFlagsInput {
 
 interface ResolvedLlmFlags {
   llmMutations: boolean;
-  llmTriage: boolean;
 }
 
 /**
@@ -466,14 +448,11 @@ interface ResolvedLlmFlags {
  * the final effective values, emitting clear warnings for misconfigurations.
  *
  * Rules:
- *  - If no key is detected, both llmMutations and llmTriage are forced to false.
+ *  - If no key is detected, llmMutations is forced to false.
  *  - If --llm-mutations is passed but no key is found, a warning is printed.
- *  - llmTriage defaults to true only when a key is actually present.
- *    This makes config semantics honest — the engine never silently ignores it.
- *  - --no-triage is always respected even when a key is present.
  */
 function resolveLlmFlags(input: ResolveLlmFlagsInput): ResolvedLlmFlags {
-  const { requestedMutations, requestedTriage, providerOverride, modelOverride, isCi } = input;
+  const { requestedMutations, providerOverride, modelOverride } = input;
 
   const llmConfig = detectLLMProvider(providerOverride, modelOverride);
   const keyPresent = llmConfig !== null;
@@ -487,23 +466,12 @@ function resolveLlmFlags(input: ResolveLlmFlagsInput): ResolvedLlmFlags {
       '           Set one of those environment variables to enable LLM mutations.',
       '',
     ].join('\n');
-    // Always write to stderr so it appears even when stdout is piped
     process.stderr.write(warning + '\n');
   }
 
-  // --no-triage is an explicit opt-out — respect it even when key is present.
-  // llmTriage defaults to true only when the user has a key (opt-out model),
-  // not when they don't (which would create a silently-ignored true in the config).
-  const llmTriage = requestedTriage && keyPresent;
   const llmMutations = requestedMutations && keyPresent;
 
-  // Only mention LLM availability if the user explicitly requested LLM features
-  // but no key was found. Silent static-only runs should stay silent — repeated
-  // "set OPENAI_API_KEY" hints on every invocation are noise for intentional
-  // static-mode users (e.g. CI pipelines that deliberately don't pass a key).
-  // The --llm-mutations warning above already covers the explicit-request case.
-
-  return { llmMutations, llmTriage };
+  return { llmMutations };
 }
 
 // ---------------------------------------------------------------------------

@@ -133,62 +133,6 @@ export interface SemanticMutationResponse {
 }
 
 // ---------------------------------------------------------------------------
-// LLM Crash Triage types (Phase C)
-// ---------------------------------------------------------------------------
-
-/**
- * Known root-cause categories the LLM triage assigns to each crash.
- * Using a closed enum forces the LLM to pick a canonical label rather
- * than hallucinating arbitrary strings, making reports consistent.
- */
-export type CrashRootCause =
-  | 'integer-overflow'
-  | 'null-pointer'
-  | 'type-coercion'
-  | 'unhandled-exception'
-  | 'sql-error'
-  | 'nosql-error'
-  | 'encoding-error'
-  | 'validation-missing'
-  | 'timeout-hang'
-  | 'memory-error'
-  | 'auth-bypass'
-  | 'path-traversal'
-  | 'injection'
-  | 'schema-mismatch'
-  | 'unknown';
-
-/**
- * Triage result for a single crash, produced by the LLM.
- * Always structured JSON — never free text injected into logic.
- */
-export interface CrashTriageResult {
-  /** The crash id this triage result corresponds to */
-  crashId: string;
-  /** Canonical root-cause category */
-  rootCause: CrashRootCause;
-  /**
-   * Confidence score 0.0–1.0.
-   * < 0.4 = low confidence (environment artifact, not a real bug)
-   * 0.4–0.7 = medium confidence (likely real, needs verification)
-   * > 0.7 = high confidence (clear bug)
-   */
-  confidence: number;
-  /** 1-2 sentence plain-English explanation of why this crash occurred */
-  notes: string;
-  /**
-   * If this crash appears to be the same root cause as another crash,
-   * set this to that crash's id. The first occurrence is the canonical one.
-   */
-  duplicateOf?: string;
-  /**
-   * LLM can upgrade or downgrade severity based on reading the stack trace.
-   * Omit to keep the static classifier's severity.
-   */
-  severityOverride?: CrashSeverity;
-}
-
-// ---------------------------------------------------------------------------
 // Execution / result types
 // ---------------------------------------------------------------------------
 
@@ -233,21 +177,6 @@ export interface CrashFinding {
   triggeringPayload: unknown;
   /** Ready-to-run curl command that reproduces the crash */
   curlReproducer: string;
-
-  // ---- LLM Triage fields (Phase C) — populated after fuzzing completes ----
-  /** LLM-assigned root cause category */
-  rootCause?: CrashRootCause;
-  /** LLM confidence score 0.0–1.0 */
-  confidence?: number;
-  /** LLM explanation of why this crash occurred */
-  triageNotes?: string;
-  /** id of another CrashFinding with the same root cause (dedup signal) */
-  duplicateOf?: string;
-  /** LLM-overridden severity (may differ from static classifier) */
-  llmSeverity?: CrashSeverity;
-
-  /** @deprecated Use triageNotes + rootCause instead */
-  llmFixSuggestion?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,8 +233,6 @@ export interface FuzzReport {
     totalEndpoints: number;
     /** Total unique crashes (post-dedup) */
     totalCrashes: number;
-    /** Crashes that are LLM-confirmed duplicates (same root cause) */
-    totalDuplicates: number;
     /** Total response contract violations detected */
     totalMismatches: number;
     /** How many mutations were LLM-generated (0 if --llm-mutations not set) */
@@ -351,12 +278,6 @@ export interface EdgeFuzzConfig {
    * Default: false (static rules always run regardless).
    */
   llmMutations: boolean;
-  /**
-   * Enable LLM crash triage (Phase C).
-   * Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.
-   * Default: true when a key is present (passive, no extra input needed).
-   */
-  llmTriage: boolean;
   /** Custom request headers to include in all fuzzing requests */
   headers: Record<string, string>;
   /** Only fuzz endpoints matching these path prefixes */
@@ -402,6 +323,4 @@ export type ProgressEvent =
   | { type: 'request_done'; result: RequestResult }
   | { type: 'crash_found'; crash: CrashFinding }
   | { type: 'mismatch_found'; mismatch: ResponseMismatch }
-  | { type: 'triage_start'; crashCount: number }
-  | { type: 'triage_done'; crashes: CrashFinding[] }
   | { type: 'done'; report: FuzzReport };

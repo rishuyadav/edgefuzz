@@ -78,8 +78,7 @@ export async function startMcpServer(): Promise<void> {
         headers: params.headers ?? {},
         includePaths: params.include_paths,
         excludePaths: params.exclude_paths,
-        llmMutations: false, // Not in MCP semantic mode by default
-        llmTriage: true,     // Always triage in MCP — agents benefit most from it
+        llmMutations: false,
       };
 
       let report: FuzzReport;
@@ -139,7 +138,6 @@ export async function startMcpServer(): Promise<void> {
         headers: params.headers ?? {},
         includePaths: [params.path],
         llmMutations: false,
-        llmTriage: true,
       };
 
       let report: FuzzReport;
@@ -185,25 +183,19 @@ function formatMcpResponse(report: FuzzReport): string {
   lines.push(`**Target:** ${report.target}`);
   lines.push(`**Spec:** ${report.specSource}`);
   lines.push(`**Generated:** ${report.generatedAt}`);
-  lines.push(`**LLM-augmented:** ${report.llmEnabled ? 'Yes' : 'No'}`);
   lines.push('');
   lines.push(`### Summary`);
   lines.push(`| Metric | Value |`);
   lines.push(`|--------|-------|`);
   lines.push(`| Total Requests | ${summary.totalRequests} |`);
   lines.push(`| Endpoints Tested | ${summary.totalEndpoints} |`);
-  lines.push(`| Unique Crashes | ${summary.totalCrashes} |`);
-  lines.push(`| Duplicate Root Causes | ${summary.totalDuplicates} |`);
+  lines.push(`| Crashes | ${summary.totalCrashes} |`);
   if (summary.llmMutations > 0) {
     lines.push(`| LLM Semantic Mutations | ${summary.llmMutations} |`);
   }
   lines.push(`| Duration | ${(summary.durationMs / 1000).toFixed(1)}s |`);
   lines.push(`| Speed | ${summary.requestsPerSecond} req/s |`);
   lines.push('');
-
-  // Separate primary from duplicate crashes for cleaner output
-  const primaryCrashes = crashes.filter((c) => !c.duplicateOf);
-  const dupCrashes = crashes.filter((c) => c.duplicateOf);
 
   if (crashes.length === 0) {
     lines.push(`### ✅ Result: No unhandled crashes found`);
@@ -213,8 +205,7 @@ function formatMcpResponse(report: FuzzReport): string {
     );
   } else {
     lines.push(
-      `### ❌ Result: ${primaryCrashes.length} Unique Crash${primaryCrashes.length !== 1 ? 'es' : ''} Found` +
-        (dupCrashes.length > 0 ? ` (+${dupCrashes.length} duplicate root causes)` : ''),
+      `### ❌ Result: ${crashes.length} Crash${crashes.length !== 1 ? 'es' : ''} Found`,
     );
     lines.push('');
     lines.push(
@@ -222,37 +213,17 @@ function formatMcpResponse(report: FuzzReport): string {
     );
     lines.push('');
 
-    for (let i = 0; i < primaryCrashes.length; i++) {
-      const crash = primaryCrashes[i]!;
+    for (let i = 0; i < crashes.length; i++) {
+      const crash = crashes[i]!;
       const statusLabel = crash.timedOut ? 'TIMEOUT' : `HTTP ${crash.statusCode}`;
-      const effectiveSeverity = crash.llmSeverity ?? crash.severity;
 
       lines.push(`#### ${i + 1}. \`${crash.endpoint.method} ${crash.endpoint.path}\``);
-      lines.push(
-        `- **Status:** ${statusLabel}` +
-          ` (severity: **${effectiveSeverity}**` +
-          (crash.llmSeverity && crash.llmSeverity !== crash.severity
-            ? ` — LLM override from ${crash.severity}`
-            : '') +
-          ')',
-      );
+      lines.push(`- **Status:** ${statusLabel} (severity: **${crash.severity}**)`);
       lines.push(
         `- **Mutation:** ${crash.mutationLabel}` +
           (crash.mutationSource === 'llm' ? ' ⚡ _LLM-generated payload_' : ''),
       );
       lines.push(`- **Category:** ${crash.mutationCategory}`);
-
-      // LLM triage fields — most valuable signal for the AI agent
-      if (crash.rootCause) {
-        const confidenceStr =
-          crash.confidence !== undefined
-            ? ` (${Math.round(crash.confidence * 100)}% confidence)`
-            : '';
-        lines.push(`- **Root cause:** \`${crash.rootCause}\`${confidenceStr}`);
-      }
-      if (crash.triageNotes) {
-        lines.push(`- **Analysis:** ${crash.triageNotes}`);
-      }
 
       if (crash.triggeringPayload !== null) {
         const payloadStr = JSON.stringify(crash.triggeringPayload, null, 2);
@@ -270,23 +241,6 @@ function formatMcpResponse(report: FuzzReport): string {
       lines.push(`  ${crash.curlReproducer}`);
       lines.push('  ```');
 
-      lines.push('');
-    }
-
-    // List duplicate crashes compactly (they share a root cause with a primary crash)
-    if (dupCrashes.length > 0) {
-      lines.push('#### Duplicate Root Causes (same underlying bug)');
-      lines.push('');
-      lines.push('These crashes share the same root cause as a primary crash above:');
-      lines.push('');
-      for (const dup of dupCrashes) {
-        const statusLabel = dup.timedOut ? 'TIMEOUT' : `HTTP ${dup.statusCode}`;
-        lines.push(
-          `- \`${dup.endpoint.method} ${dup.endpoint.path}\` → ${statusLabel}` +
-            (dup.rootCause ? ` [${dup.rootCause}]` : '') +
-            (dup.duplicateOf ? ` — same as crash \`${dup.duplicateOf}\`` : ''),
-        );
-      }
       lines.push('');
     }
   }

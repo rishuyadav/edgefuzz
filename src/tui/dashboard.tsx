@@ -7,14 +7,13 @@
  * Phases:
  *  preparing  → LLM generating semantic mutations (if --llm-mutations)
  *  running    → Fuzzing in progress
- *  triaging   → LLM triage of crashes (if key present)
  *  done       → Summary + crash details
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, Newline, useApp } from 'ink';
 import Spinner from 'ink-spinner';
-import type { ProgressEvent, CrashFinding, FuzzReport, CrashRootCause } from '../types/index.js';
+import type { ProgressEvent, CrashFinding, FuzzReport } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -26,7 +25,7 @@ interface DashboardProps {
   events: AsyncIterable<ProgressEvent>;
 }
 
-type Phase = 'preparing' | 'running' | 'triaging' | 'done';
+type Phase = 'preparing' | 'running' | 'done';
 
 // ---------------------------------------------------------------------------
 // Root component
@@ -45,7 +44,6 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
   const [llmEnabled, setLlmEnabled] = useState(false);
   const [llmMutationCount, setLlmMutationCount] = useState(0);
   const [preparingEndpoints, setPreparingEndpoints] = useState(0);
-  const [triageCount, setTriageCount] = useState(0);
 
   const startTimeRef = useRef(Date.now());
   const doneRef = useRef(0);
@@ -90,16 +88,6 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
             });
             break;
 
-          case 'triage_start':
-            setPhase('triaging');
-            setTriageCount(event.crashCount);
-            break;
-
-          case 'triage_done':
-            // Replace crashes with triage-enriched versions
-            setCrashes(event.crashes);
-            break;
-
           case 'done':
             clearInterval(timer);
             setReport(event.report);
@@ -116,10 +104,6 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
 
   if (phase === 'preparing') {
     return <PreparingView endpointCount={preparingEndpoints} />;
-  }
-
-  if (phase === 'triaging') {
-    return <TriagingView crashCount={triageCount} />;
   }
 
   if (phase === 'running') {
@@ -164,32 +148,6 @@ function PreparingView({ endpointCount }: { endpointCount: number }) {
         <Text dimColor>
           The LLM is reading each endpoint schema and generating domain-specific adversarial payloads...
         </Text>
-      </Box>
-    </Box>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Triaging view (LLM crash triage in progress)
-// ---------------------------------------------------------------------------
-
-function TriagingView({ crashCount }: { crashCount: number }) {
-  return (
-    <Box flexDirection="column" paddingX={1} paddingY={1}>
-      <Box marginBottom={1}>
-        <Text bold color="cyan">⚡ EdgeFuzz</Text>
-        <Text dimColor>  —  LLM triage</Text>
-      </Box>
-      <Box gap={2}>
-        <Spinner type="dots" />
-        <Text>
-          Triaging{' '}
-          <Text bold color="red">{crashCount}</Text> crash{crashCount !== 1 ? 'es' : ''}
-          {' '}— LLM is reading stack traces and classifying root causes...
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text dimColor>Identifying duplicates, severity overrides, and root-cause labels...</Text>
       </Box>
     </Box>
   );
@@ -283,16 +241,13 @@ function RunningView({
 function SummaryView({ report, crashes }: { report: FuzzReport; crashes: CrashFinding[] }) {
   const { summary } = report;
   const hascrashes = crashes.length > 0;
-  // Show canonical crashes only (exclude duplicates in the list, but note them)
-  const primaryCrashes = crashes.filter((c) => !c.duplicateOf);
-  const duplicateCount = crashes.filter((c) => c.duplicateOf).length;
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={1}>
       {/* Header */}
       <Box marginBottom={1}>
         <Text bold color="cyan">⚡ EdgeFuzz Audit Complete</Text>
-        {report.llmEnabled
+        {summary.llmMutations > 0
           ? <Text color="magenta">  [LLM-augmented]</Text>
           : <Text dimColor>  [static-only — set OPENAI_API_KEY to enable LLM features]</Text>
         }
@@ -324,11 +279,10 @@ function SummaryView({ report, crashes }: { report: FuzzReport; crashes: CrashFi
       {hascrashes && (
         <Box flexDirection="column">
           <Text bold color="red">
-            ✗ Found {primaryCrashes.length} unique crash{primaryCrashes.length !== 1 ? 'es' : ''}
-            {duplicateCount > 0 && <Text dimColor> (+{duplicateCount} duplicate root causes)</Text>}
+            ✗ Found {crashes.length} crash{crashes.length !== 1 ? 'es' : ''}
           </Text>
           <Newline />
-          {primaryCrashes.map((crash, i) => (
+          {crashes.map((crash, i) => (
             <Box key={crash.id} flexDirection="column" marginBottom={2}>
               <Text bold>
                 {i + 1}. {crash.endpoint.method} {crash.endpoint.path}
@@ -353,12 +307,10 @@ function SummaryView({ report, crashes }: { report: FuzzReport; crashes: CrashFi
 // ---------------------------------------------------------------------------
 
 function CrashRow({ crash, compact }: { crash: CrashFinding; compact: boolean }) {
-  // Use LLM severity when available, fall back to static
-  const effectiveSeverity = crash.llmSeverity ?? crash.severity;
   const severityColor =
-    effectiveSeverity === 'critical' ? 'red'
-      : effectiveSeverity === 'high' ? 'yellow'
-        : effectiveSeverity === 'medium' ? 'white'
+    crash.severity === 'critical' ? 'red'
+      : crash.severity === 'high' ? 'yellow'
+        : crash.severity === 'medium' ? 'white'
           : 'gray';
 
   const statusLabel = crash.timedOut ? 'TIMEOUT'
@@ -388,33 +340,8 @@ function CrashRow({ crash, compact }: { crash: CrashFinding; compact: boolean })
         <Text dimColor>├─ Result     </Text>
         <Text color={severityColor}>{statusLabel}</Text>
         <Text dimColor>  severity: </Text>
-        <Text color={severityColor}>{effectiveSeverity}</Text>
-        {crash.llmSeverity && crash.llmSeverity !== crash.severity && (
-          <Text dimColor> (LLM override from {crash.severity})</Text>
-        )}
+        <Text color={severityColor}>{crash.severity}</Text>
       </Box>
-      {/* LLM triage fields */}
-      {crash.rootCause && (
-        <Box>
-          <Text dimColor>├─ Root cause </Text>
-          <Text color="yellow">{crash.rootCause}</Text>
-          {crash.confidence !== undefined && (
-            <Text dimColor>  (confidence: {Math.round(crash.confidence * 100)}%)</Text>
-          )}
-        </Box>
-      )}
-      {crash.triageNotes && (
-        <Box>
-          <Text dimColor>├─ Analysis  </Text>
-          <Text>{truncate(crash.triageNotes, 100)}</Text>
-        </Box>
-      )}
-      {crash.duplicateOf && (
-        <Box>
-          <Text dimColor>├─ Note      </Text>
-          <Text color="gray">Same root cause as crash {crash.duplicateOf}</Text>
-        </Box>
-      )}
       {crash.responseBody && (
         <Box>
           <Text dimColor>├─ Response  </Text>
@@ -431,29 +358,6 @@ function CrashRow({ crash, compact }: { crash: CrashFinding; compact: boolean })
       </Box>
     </Box>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Root cause label display helper
-// ---------------------------------------------------------------------------
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function rootCauseColor(rc: CrashRootCause): string {
-  switch (rc) {
-    case 'sql-error':
-    case 'nosql-error':
-    case 'injection':
-    case 'path-traversal':
-    case 'auth-bypass':
-      return 'red';
-    case 'integer-overflow':
-    case 'null-pointer':
-    case 'memory-error':
-    case 'timeout-hang':
-      return 'yellow';
-    default:
-      return 'white';
-  }
 }
 
 // ---------------------------------------------------------------------------

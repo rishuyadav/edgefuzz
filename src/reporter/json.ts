@@ -29,8 +29,6 @@ export function buildReport(input: ReportInput): FuzzReport {
   const requestsPerSecond =
     durationMs > 0 ? Math.round((totalRequests / durationMs) * 1000) : 0;
 
-  const totalDuplicates = crashes.filter((c) => c.duplicateOf !== undefined).length;
-
   return {
     version: '1',
     generatedAt: new Date().toISOString(),
@@ -41,7 +39,6 @@ export function buildReport(input: ReportInput): FuzzReport {
       totalRequests,
       totalEndpoints: spec.endpoints.length,
       totalCrashes: crashes.length,
-      totalDuplicates,
       totalMismatches: mismatches.length,
       llmMutations: llmMutationCount,
       durationMs,

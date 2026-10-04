@@ -36,7 +36,7 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
         if (event.llmEnabled) {
           console.log(
             chalk.magenta('[EdgeFuzz] Mode: LLM-augmented') +
-              chalk.dim(' (crash triage enabled; use --llm-mutations for semantic payloads)'),
+              chalk.dim(' (use --llm-mutations for semantic payloads)'),
           );
         } else {
           console.log(
@@ -96,22 +96,6 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
         break;
       }
 
-      case 'triage_start':
-        process.stdout.write('\n');
-        console.log(
-          chalk.magenta(`[EdgeFuzz] LLM triaging ${event.crashCount} crash${event.crashCount !== 1 ? 'es' : ''}...`),
-        );
-        break;
-
-      case 'triage_done':
-        // Update local crash array with triage-enriched versions
-        for (const enriched of event.crashes) {
-          const idx = crashes.findIndex((c) => c.id === enriched.id);
-          if (idx >= 0) crashes[idx] = enriched;
-        }
-        console.log(chalk.magenta('[EdgeFuzz] Triage complete'));
-        break;
-
       case 'done':
         process.stdout.write('\n');
         printCiSummary(event.report, crashes, mismatches);
@@ -119,7 +103,7 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
     }
   }
 
-  return { totalCrashes: crashes.filter((c) => !c.duplicateOf).length };
+  return { totalCrashes: crashes.length };
 }
 
 function printCiSummary(report: FuzzReport, crashes: CrashFinding[], mismatches: ResponseMismatch[]): void {
@@ -128,7 +112,7 @@ function printCiSummary(report: FuzzReport, crashes: CrashFinding[], mismatches:
   console.log(chalk.dim('─'.repeat(60)));
   console.log(
     chalk.cyan('⚡ EdgeFuzz Audit Complete') +
-      (report.llmEnabled ? chalk.magenta('  [LLM-augmented]') : ''),
+      (summary.llmMutations > 0 ? chalk.magenta('  [LLM-augmented]') : ''),
   );
   console.log(
     chalk.dim(
@@ -149,47 +133,27 @@ function printCiSummary(report: FuzzReport, crashes: CrashFinding[], mismatches:
     console.log(chalk.green('✓ No unhandled crashes found.'));
   }
 
-  // Separate primary from duplicates
-  const primaryCrashes = crashes.filter((c) => !c.duplicateOf);
-  const dupCount = crashes.filter((c) => c.duplicateOf).length;
-
-  console.log(
-    chalk.red(
-      `\n✗ Found ${primaryCrashes.length} unique crash${primaryCrashes.length !== 1 ? 'es' : ''}` +
-        (dupCount > 0 ? ` (+${dupCount} duplicate root causes)` : '') +
-        ':\n',
-    ),
-  );
-
-  for (let i = 0; i < primaryCrashes.length; i++) {
-    const crash = primaryCrashes[i]!;
-    const statusLabel = crash.timedOut ? 'TIMEOUT' : `HTTP ${crash.statusCode}`;
-    const effectiveSeverity = crash.llmSeverity ?? crash.severity;
-    const source = crash.mutationSource === 'llm' ? ' [LLM payload]' : '';
-
+  if (crashes.length > 0) {
     console.log(
-      chalk.bold(`${i + 1}. ${crash.endpoint.method} ${crash.endpoint.path}`) +
-        chalk.red(` → ${statusLabel}`) +
-        chalk.dim(` [severity: ${effectiveSeverity}]`) +
-        (source ? chalk.magenta(source) : ''),
+      chalk.red(`\n✗ Found ${crashes.length} crash${crashes.length !== 1 ? 'es' : ''}:\n`),
     );
-    console.log(chalk.dim(`   Mutation : ${crash.mutationLabel}`));
 
-    // LLM triage fields
-    if (crash.rootCause) {
-      const confidence =
-        crash.confidence !== undefined
-          ? ` (${Math.round(crash.confidence * 100)}% confidence)`
-          : '';
-      console.log(chalk.yellow(`   Root cause: ${crash.rootCause}${confidence}`));
-    }
-    if (crash.triageNotes) {
-      console.log(chalk.dim(`   Analysis : ${crash.triageNotes}`));
-    }
+    for (let i = 0; i < crashes.length; i++) {
+      const crash = crashes[i]!;
+      const statusLabel = crash.timedOut ? 'TIMEOUT' : `HTTP ${crash.statusCode}`;
+      const source = crash.mutationSource === 'llm' ? ' [LLM payload]' : '';
 
-    console.log(chalk.dim('   Reproducer:'));
-    console.log(chalk.cyan(`   ${crash.curlReproducer.replace(/\s*\\\n\s*/g, ' ')}`));
-    console.log();
+      console.log(
+        chalk.bold(`${i + 1}. ${crash.endpoint.method} ${crash.endpoint.path}`) +
+          chalk.red(` → ${statusLabel}`) +
+          chalk.dim(` [severity: ${crash.severity}]`) +
+          (source ? chalk.magenta(source) : ''),
+      );
+      console.log(chalk.dim(`   Mutation : ${crash.mutationLabel}`));
+      console.log(chalk.dim('   Reproducer:'));
+      console.log(chalk.cyan(`   ${crash.curlReproducer.replace(/\s*\\\n\s*/g, ' ')}`));
+      console.log();
+    }
   }
 
   // Contract violation summary
