@@ -189,28 +189,54 @@ npm install -g edgefuzz
 Usage: edgefuzz [options] [target-url]
 
 Arguments:
-  target-url               Base URL of the running API server
+  target-url                    Base URL of the running API server
 
 Options:
-  -V, --version            Output the version number
-  --demo                   Start the built-in demo API and fuzz it (no setup needed)
-  --spec <path>            Path or URL to OpenAPI 3.x spec (auto-discovered if omitted)
-  --mcp                    Start as an MCP server (for AI coding agents)
-  -c, --concurrency <n>    Max concurrent requests (default: 20)
-  -t, --timeout <ms>       Per-request timeout in milliseconds (default: 5000)
-  -o, --output <path>      Report output path (default: edgefuzz-report.json)
-  --no-report              Skip writing the JSON report file
-  --ci                     Force CI mode: plain text output, no TUI
-                           (auto-detected when stdout is not a TTY)
-  -H, --header <header>    Add a request header (repeatable)
-  --include <paths>        Only fuzz paths matching this prefix (comma-separated)
-  --exclude <paths>        Skip paths matching this prefix (comma-separated)
-  --llm <provider>         LLM provider: "openai" or "anthropic"
-  --llm-model <model>      Override the LLM model name
-  --llm-base-url <url>     Custom LLM API base URL (LiteLLM, Ollama, Azure, etc.)
-  --llm-mutations          Enable LLM semantic mutations. Requires key.
-  --no-triage              Disable LLM crash triage
-  -h, --help               Display help
+  -V, --version                 Output the version number
+  --demo                        Start the built-in demo API and fuzz it (no setup needed)
+  --spec <path>                 Path or URL to OpenAPI 3.x spec (auto-discovered if omitted)
+  --mcp                         Start as an MCP server (for AI coding agents)
+  -c, --concurrency <n>         Max concurrent requests (default: 20)
+  -t, --timeout <ms>            Per-request timeout in milliseconds (default: 5000)
+  -o, --output <path>           Report output path (default: edgefuzz-report.json)
+  --no-report                   Skip writing the JSON report file
+  --ci                          Force CI mode: plain text output, no TUI
+                                (auto-detected when stdout is not a TTY)
+  -H, --header <header>         Add a request header (repeatable)
+  --auth-command <cmd>          Shell command that prints a bearer token.
+                                Re-run automatically on 401 to handle expiry.
+  --tls-insecure                Skip TLS certificate verification (self-signed certs)
+  --delay <ms>                  Delay between requests — prevents rate limiting
+  --no-response-validation      Disable response schema validation (crash-only mode)
+  --include <paths>             Only fuzz paths matching this prefix (comma-separated)
+  --exclude <paths>             Skip paths matching this prefix (comma-separated)
+  --llm <provider>              LLM provider: "openai" or "anthropic"
+  --llm-model <model>           Override the LLM model name
+  --llm-base-url <url>          Custom LLM API base URL (LiteLLM, Ollama, Azure, etc.)
+  --llm-mutations               Enable LLM semantic mutations. Requires key.
+  --no-triage                   Disable LLM crash triage
+  -h, --help                    Display help
+```
+
+### Auth Examples
+
+```bash
+# OAuth client credentials (auto-refreshes on 401)
+edgefuzz http://localhost:8080 \
+  --auth-command 'curl -s -X POST https://auth.example.com/token \
+    -d "grant_type=client_credentials&client_id=x&client_secret=y" | jq -r .access_token'
+
+# Simple API key from env
+edgefuzz http://localhost:8080 --auth-command 'echo $MY_API_KEY'
+
+# Short-lived JWT (re-run on 401 automatically)
+edgefuzz http://localhost:8080 --auth-command './scripts/get-token.sh'
+
+# Self-signed TLS cert (dev/staging)
+edgefuzz https://localhost:8443 --tls-insecure
+
+# Rate-limited API (50ms between requests)
+edgefuzz http://localhost:8080 --delay 50
 ```
 
 ### LLM Modes
@@ -233,6 +259,24 @@ Options:
 | `ANTHROPIC_API_KEY` | Enable LLM features via Anthropic (`claude-3-5-haiku` default) |
 | `EDGEFUZZ_LLM_MODEL` | Override default model name (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
 | `EDGEFUZZ_LLM_BASE_URL` | Custom LLM API base URL — point at LiteLLM, Ollama, Azure OpenAI, or any OpenAI-compatible proxy. When set, `OPENAI_API_KEY` is used as the proxy token. |
+
+---
+
+## Response Contract Validation
+
+When your OpenAPI spec documents response schemas, EdgeFuzz validates every response body against them. It detects:
+
+| Violation | Severity | Description |
+|:----------|:---------|:------------|
+| `missing-required-field` | medium | A `required` property is absent from a 2xx response body |
+| `wrong-type` | low | A field is present but has the wrong JSON type vs. the spec |
+| `error-body-leaked` | **high** | A 4xx response body contains a stack trace, ORM error, SQL exception, or credential |
+| `undocumented-status` | low | Server returned a status code not listed in the spec's `responses` |
+| `empty-success-body` | medium | 200/201 returned an empty body when the spec defines an object/array |
+
+Data leakage detection recognises 16 patterns including: JS/Python/Java/PHP/Ruby stack traces, Sequelize, TypeORM, Prisma, MongoDB, ActiveRecord errors, and connection strings in response bodies.
+
+These findings appear in a `mismatches[]` array in `edgefuzz-report.json` alongside the crash findings, and in a separate summary section in CI output.
 
 ---
 
@@ -282,6 +326,7 @@ Options:
     "totalEndpoints": 18,
     "totalCrashes": 3,
     "totalDuplicates": 1,
+    "totalMismatches": 2,
     "llmMutations": 24,
     "durationMs": 3200,
     "requestsPerSecond": 138
