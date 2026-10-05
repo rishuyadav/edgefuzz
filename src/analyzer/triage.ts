@@ -46,11 +46,28 @@ const VALID_SEVERITIES = new Set<string>(['critical', 'high', 'medium', 'low']);
 // ---------------------------------------------------------------------------
 
 /**
+ * Callback fired after each batch of crashes is triaged by the LLM.
+ *
+ * @param batchIndex   Zero-based index of the batch that just completed
+ * @param totalBatches Total number of batches in this triage run
+ * @param results      Triage results for the crashes in this batch
+ */
+export type TriageBatchDoneCallback = (
+  batchIndex: number,
+  totalBatches: number,
+  results: CrashTriageResult[],
+) => void;
+
+/**
  * Triage all crashes via LLM. Mutates each CrashFinding in-place
  * with rootCause, confidence, triageNotes, duplicateOf, and llmSeverity.
  *
  * Crashes are sorted by endpoint path before batching so the LLM sees
  * related crashes together — this significantly improves duplicateOf detection.
+ *
+ * Fires onBatchDone after each batch completes with the partial results,
+ * enabling the TUI to stream classified crashes in real time rather than
+ * waiting for the entire triage run to finish.
  *
  * Safe to call with any number of crashes — batches large sets automatically.
  * Returns without modifying findings if LLM call fails.
@@ -58,6 +75,7 @@ const VALID_SEVERITIES = new Set<string>(['critical', 'high', 'medium', 'low']);
 export async function triageCrashes(
   crashes: CrashFinding[],
   config: LLMConfig,
+  onBatchDone?: TriageBatchDoneCallback,
 ): Promise<void> {
   if (crashes.length === 0) return;
 
@@ -70,9 +88,16 @@ export async function triageCrashes(
 
   // Batch into groups of 20 max (LLM context window consideration)
   const BATCH_SIZE = 20;
+  const totalBatches = Math.ceil(sorted.length / BATCH_SIZE);
+
   for (let i = 0; i < sorted.length; i += BATCH_SIZE) {
+    const batchIndex = Math.floor(i / BATCH_SIZE);
     const batch = sorted.slice(i, i + BATCH_SIZE);
-    await triageBatch(batch, config);
+    const results = await triageBatch(batch, config);
+    // Apply results to CrashFindings in-place
+    applyTriageResults(batch, results);
+    // Notify caller with partial results so the TUI can render them immediately
+    onBatchDone?.(batchIndex, totalBatches, results);
   }
 }
 
@@ -80,7 +105,12 @@ export async function triageCrashes(
 // Batch triage
 // ---------------------------------------------------------------------------
 
-async function triageBatch(crashes: CrashFinding[], config: LLMConfig): Promise<void> {
+/**
+ * Triage a single batch of crashes and return the parsed results.
+ * Does NOT apply results to the CrashFindings — that is the caller's responsibility.
+ * On LLM failure, returns an empty array and leaves crash findings unchanged.
+ */
+async function triageBatch(crashes: CrashFinding[], config: LLMConfig): Promise<CrashTriageResult[]> {
   const prompt = buildTriagePrompt(crashes);
 
   try {
@@ -91,12 +121,12 @@ async function triageBatch(crashes: CrashFinding[], config: LLMConfig): Promise<
       raw = await callAnthropicTriage(prompt, config);
     }
 
-    const results = parseTriageResponse(raw, crashes);
-    applyTriageResults(crashes, results);
+    return parseTriageResponse(raw, crashes);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[EdgeFuzz] LLM triage failed, using static classification: ${msg}\n`);
     // Crashes remain with their static classification — no change
+    return [];
   }
 }
 

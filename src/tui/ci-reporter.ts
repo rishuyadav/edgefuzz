@@ -21,13 +21,25 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
     switch (event.type) {
       case 'llm_mutations_generating':
         console.log(
-          chalk.magenta(`[EdgeFuzz] LLM generating semantic mutations for ${event.endpointCount} endpoints...`),
+          chalk.magenta(`[EdgeFuzz] LLM generating semantic mutations for ${event.endpointCount} endpoint${event.endpointCount !== 1 ? 's' : ''}...`),
+        );
+        break;
+
+      case 'llm_mutation_endpoint_done':
+        // Print one line per completed endpoint so CI logs show real-time progress
+        // rather than a silent gap during the ~14s LLM mutation generation window.
+        console.log(
+          chalk.magenta(`[LLM] ${event.method.padEnd(6)} ${event.path}`) +
+            chalk.dim(
+              ` → ${event.count > 0 ? `${event.count} semantic payload${event.count !== 1 ? 's' : ''}` : 'no domain-specific payloads'}` +
+                `  (${event.done}/${event.total})`,
+            ),
         );
         break;
 
       case 'llm_mutations_ready':
         console.log(
-          chalk.magenta(`[EdgeFuzz] LLM generated ${event.count} semantic mutations`),
+          chalk.magenta(`[EdgeFuzz] LLM generated ${event.count} semantic mutation${event.count !== 1 ? 's' : ''} total`),
         );
         break;
 
@@ -99,9 +111,33 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
       case 'triage_start':
         process.stdout.write('\n');
         console.log(
-          chalk.magenta(`[triage] Analysing ${event.crashCount} crash${event.crashCount !== 1 ? 'es' : ''} with LLM — classifying root causes + grouping duplicates...`),
+          chalk.magenta(
+            `[triage] Classifying ${event.crashCount} crash${event.crashCount !== 1 ? 'es' : ''} ` +
+              `in ${Math.ceil(event.crashCount / 20)} batch${Math.ceil(event.crashCount / 20) !== 1 ? 'es' : ''} of 20...`,
+          ),
         );
         break;
+
+      case 'triage_batch_done': {
+        // Surface per-batch progress so CI logs aren't silent during the triage window.
+        // Print a summary line for the batch, then individual crash classifications.
+        const uniqueCount = event.results.filter((r) => !r.duplicateOf).length;
+        const dupCount = event.results.filter((r) => !!r.duplicateOf).length;
+        console.log(
+          chalk.magenta(
+            `[triage] Batch ${event.batchIndex + 1}/${event.totalBatches} done` +
+              ` — ${uniqueCount} unique, ${dupCount} duplicate${dupCount !== 1 ? 's' : ''}`,
+          ),
+        );
+        for (const r of event.results) {
+          const pct = Math.round(r.confidence * 100);
+          const dupNote = r.duplicateOf ? chalk.dim('  [dup]') : chalk.dim(`  ${pct}%`);
+          console.log(
+            chalk.dim(`  ${r.rootCause.padEnd(22)}`) + dupNote,
+          );
+        }
+        break;
+      }
 
       case 'triage_done':
         if (event.duplicateCount > 0) {

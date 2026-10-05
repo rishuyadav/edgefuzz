@@ -380,10 +380,16 @@ export interface EdgeFuzzConfig {
 export type ProgressEvent =
   | { type: 'start'; totalRequests: number; totalEndpoints: number; llmEnabled: boolean }
   | { type: 'llm_mutations_generating'; endpointCount: number }
+  // Fired once per endpoint as LLM mutation generation completes for it.
+  // done/total allow computing a progress percentage across all endpoints.
+  | { type: 'llm_mutation_endpoint_done'; method: string; path: string; count: number; done: number; total: number }
   | { type: 'llm_mutations_ready'; count: number }
   | { type: 'request_done'; result: RequestResult }
   | { type: 'crash_found'; crash: CrashFinding }
   | { type: 'mismatch_found'; mismatch: ResponseMismatch }
   | { type: 'triage_start'; crashCount: number }
+  // Fired once per batch of up to 20 crashes as LLM triage completes each batch.
+  // Carries the partial results so the TUI can render classified crashes in real time.
+  | { type: 'triage_batch_done'; batchIndex: number; totalBatches: number; results: CrashTriageResult[] }
   | { type: 'triage_done'; duplicateCount: number }
   | { type: 'done'; report: FuzzReport };

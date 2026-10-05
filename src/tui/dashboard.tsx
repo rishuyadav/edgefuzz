@@ -9,12 +9,21 @@
  *  running    → Fuzzing in progress
  *  triaging   → LLM crash triage (if --triage and crashes > 0)
  *  done       → Summary + crash details
+ *
+ * UX design:
+ *  - preparing: per-endpoint checklist with progress bar + elapsed timer.
+ *    Each endpoint lights up as its LLM call completes rather than showing
+ *    a static spinner for the entire ~14s generation window.
+ *  - triaging: per-crash stream as each batch of 20 completes. Last 10
+ *    classified crashes visible; overflow shown as "(+N classified above)".
+ *    Progress bar advances per-batch, not at the end.
+ *  - running: unchanged live progress bar with inline crash list.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, Newline, useApp } from 'ink';
 import Spinner from 'ink-spinner';
-import type { ProgressEvent, CrashFinding, FuzzReport } from '../types/index.js';
+import type { ProgressEvent, CrashFinding, FuzzReport, CrashTriageResult } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,6 +37,22 @@ interface DashboardProps {
 
 type Phase = 'preparing' | 'running' | 'triaging' | 'done';
 
+interface EndpointResult {
+  method: string;
+  path: string;
+  count: number;
+}
+
+/** Flat, display-ready row for a triaged crash. */
+interface TriageRow {
+  crashId: string;
+  method: string;
+  path: string;
+  rootCause: string;
+  confidence: number;
+  isDuplicate: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Root component
 // ---------------------------------------------------------------------------
@@ -35,7 +60,10 @@ type Phase = 'preparing' | 'running' | 'triaging' | 'done';
 export function Dashboard({ target, specSource, events }: DashboardProps) {
   const { exit } = useApp();
 
+  // --- Phase ---
   const [phase, setPhase] = useState<Phase>('running');
+
+  // --- Fuzzing state ---
   const [totalRequests, setTotalRequests] = useState(0);
   const [doneRequests, setDoneRequests] = useState(0);
   const [crashes, setCrashes] = useState<CrashFinding[]>([]);
@@ -44,27 +72,60 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [llmEnabled, setLlmEnabled] = useState(false);
   const [llmMutationCount, setLlmMutationCount] = useState(0);
-  const [preparingEndpoints, setPreparingEndpoints] = useState(0);
-  const [triagingCount, setTriagingCount] = useState(0);
 
+  // --- LLM mutation generation state ---
+  const [preparingTotal, setPreparingTotal] = useState(0);
+  const [endpointResults, setEndpointResults] = useState<EndpointResult[]>([]);
+  const [preparingElapsed, setPreparingElapsed] = useState(0);
+
+  // --- LLM triage state ---
+  const [triagingCrashCount, setTriagingCrashCount] = useState(0);
+  const [triageBatchDone, setTriageBatchDone] = useState(0);
+  const [triageTotalBatches, setTriageTotalBatches] = useState(0);
+  const [triageRows, setTriageRows] = useState<TriageRow[]>([]);
+  const [triageElapsed, setTriageElapsed] = useState(0);
+
+  // --- Refs for non-reactive values ---
   const startTimeRef = useRef(Date.now());
+  const preparingStartRef = useRef<number | null>(null);
+  const triagingStartRef = useRef<number | null>(null);
   const doneRef = useRef(0);
+  // Mirror of crashes state for use inside async event loop without stale closure
+  const crashesRef = useRef<CrashFinding[]>([]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>;
 
     const consume = async () => {
+      // Tick every 200ms — update elapsed counters for all active phases
       timer = setInterval(() => {
-        const elapsed = (Date.now() - startTimeRef.current) / 1000;
-        setElapsedSec(Math.floor(elapsed));
-        setRps(elapsed > 0 ? Math.round(doneRef.current / elapsed) : 0);
+        const now = Date.now();
+        const fuzzElapsed = (now - startTimeRef.current) / 1000;
+        setElapsedSec(Math.floor(fuzzElapsed));
+        setRps(fuzzElapsed > 0 ? Math.round(doneRef.current / fuzzElapsed) : 0);
+
+        if (preparingStartRef.current !== null) {
+          setPreparingElapsed(Math.floor((now - preparingStartRef.current) / 1000));
+        }
+        if (triagingStartRef.current !== null) {
+          setTriageElapsed(Math.floor((now - triagingStartRef.current) / 1000));
+        }
       }, 200);
 
       for await (const event of events) {
         switch (event.type) {
+
           case 'llm_mutations_generating':
             setPhase('preparing');
-            setPreparingEndpoints(event.endpointCount);
+            setPreparingTotal(event.endpointCount);
+            preparingStartRef.current = Date.now();
+            break;
+
+          case 'llm_mutation_endpoint_done':
+            setEndpointResults((prev) => [
+              ...prev,
+              { method: event.method, path: event.path, count: event.count },
+            ]);
             break;
 
           case 'llm_mutations_ready':
@@ -75,7 +136,11 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
             setTotalRequests(event.totalRequests);
             setLlmEnabled(event.llmEnabled);
             setPhase('running');
+            // Reset fuzz timer at the moment fuzzing actually starts
+            // (after any LLM mutation generation completes)
             startTimeRef.current = Date.now();
+            doneRef.current = 0;
+            preparingStartRef.current = null;
             break;
 
           case 'request_done':
@@ -86,21 +151,48 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
           case 'crash_found':
             setCrashes((prev) => {
               if (prev.find((c) => c.id === event.crash.id)) return prev;
-              return [...prev, event.crash];
+              const next = [...prev, event.crash];
+              crashesRef.current = next;
+              return next;
             });
             break;
 
           case 'triage_start':
-            setTriagingCount(event.crashCount);
+            setTriagingCrashCount(event.crashCount);
+            setTriageTotalBatches(Math.ceil(event.crashCount / 20));
+            triagingStartRef.current = Date.now();
             setPhase('triaging');
             break;
 
+          case 'triage_batch_done': {
+            setTriageBatchDone(event.batchIndex + 1);
+            // Resolve method + path from the crash ref so we can display them inline.
+            // CrashFindings have already been mutated in-place by applyTriageResults,
+            // but we build TriageRow from the event.results to ensure we have the
+            // rootCause/confidence that came back from this specific batch.
+            const newRows: TriageRow[] = event.results.map((r: CrashTriageResult) => {
+              const crash = crashesRef.current.find((c) => c.id === r.crashId);
+              return {
+                crashId: r.crashId,
+                method: crash?.endpoint.method ?? '',
+                path: crash?.endpoint.path ?? '',
+                rootCause: r.rootCause,
+                confidence: r.confidence,
+                isDuplicate: !!r.duplicateOf,
+              };
+            });
+            setTriageRows((prev) => [...prev, ...newRows]);
+            break;
+          }
+
           case 'triage_done':
-            // Phase transitions to 'done' when the 'done' event arrives
+            // triage_done just signals completion; phase transitions via 'done'
             break;
 
           case 'done':
             clearInterval(timer);
+            preparingStartRef.current = null;
+            triagingStartRef.current = null;
             setReport(event.report);
             setPhase('done');
             setTimeout(() => exit(), 100);
@@ -113,12 +205,28 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
     return () => clearInterval(timer);
   }, [events, exit]);
 
+  // --- Render by phase ---
+
   if (phase === 'preparing') {
-    return <PreparingView endpointCount={preparingEndpoints} />;
+    return (
+      <PreparingView
+        total={preparingTotal}
+        results={endpointResults}
+        elapsedSec={preparingElapsed}
+      />
+    );
   }
 
   if (phase === 'triaging') {
-    return <TriagingView crashCount={triagingCount} />;
+    return (
+      <TriagingView
+        crashCount={triagingCrashCount}
+        batchDone={triageBatchDone}
+        totalBatches={triageTotalBatches}
+        rows={triageRows}
+        elapsedSec={triageElapsed}
+      />
+    );
   }
 
   if (phase === 'running') {
@@ -141,57 +249,180 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Preparing view (LLM semantic mutation generation)
+// Preparing view — per-endpoint LLM mutation generation checklist
 // ---------------------------------------------------------------------------
 
-function PreparingView({ endpointCount }: { endpointCount: number }) {
+interface PreparingViewProps {
+  total: number;
+  results: EndpointResult[];
+  elapsedSec: number;
+}
+
+function PreparingView({ total, results, elapsedSec }: PreparingViewProps) {
+  const done = results.length;
+  const barWidth = 28;
+  const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
+  const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
+  const stillRunning = done < total;
+
   return (
     <Box flexDirection="column" paddingX={1} paddingY={1}>
+      {/* Header */}
       <Box marginBottom={1}>
         <Text bold color="cyan">⚡ EdgeFuzz</Text>
-        <Text dimColor>  —  LLM mode</Text>
+        <Text color="magenta">  [LLM mode]</Text>
+        <Text dimColor>  —  generating semantic mutations</Text>
       </Box>
-      <Box gap={2}>
-        <Spinner type="dots" />
-        <Text>
-          Generating semantic mutations via LLM for{' '}
-          <Text bold color="yellow">{endpointCount}</Text> endpoint{endpointCount !== 1 ? 's' : ''}
-          <Text dimColor>  (this runs once before fuzzing starts)</Text>
-        </Text>
+
+      {/* Progress bar */}
+      <Box marginBottom={1}>
+        <Text color="magenta">{bar}</Text>
+        <Text>{'  '}</Text>
+        <Text bold>{done}</Text>
+        <Text dimColor> / {total} endpoints</Text>
+        <Text dimColor>{'  '}{elapsedSec}s</Text>
       </Box>
-      <Box marginTop={1}>
-        <Text dimColor>
-          The LLM is reading each endpoint schema and generating domain-specific adversarial payloads...
-        </Text>
-      </Box>
+
+      {/* Completed endpoint checklist */}
+      {results.map((r) => (
+        <Box key={`${r.method}:${r.path}`}>
+          <Text color="green">  ✓ </Text>
+          <Text bold color="white">{r.method.padEnd(6)}</Text>
+          <Text>{r.path.padEnd(35)}</Text>
+          <Text dimColor>
+            {r.count > 0
+              ? `${r.count} payload${r.count !== 1 ? 's' : ''}`
+              : 'no domain-specific payloads'}
+          </Text>
+        </Box>
+      ))}
+
+      {/* In-flight indicator */}
+      {stillRunning && (
+        <Box marginTop={results.length > 0 ? 0 : 1}>
+          <Text color="yellow">  </Text>
+          <Spinner type="dots" />
+          <Text dimColor>  generating...</Text>
+        </Box>
+      )}
+
+      {/* Explanatory footer shown while waiting */}
+      {stillRunning && (
+        <Box marginTop={1}>
+          <Text dimColor>
+            LLM reads each endpoint schema and generates domain-specific adversarial payloads.
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Triaging view (LLM crash triage — post-fuzzing, opt-in via --triage)
+// Triaging view — per-batch streaming crash classification
 // ---------------------------------------------------------------------------
 
-function TriagingView({ crashCount }: { crashCount: number }) {
+interface TriagingViewProps {
+  crashCount: number;
+  batchDone: number;
+  totalBatches: number;
+  rows: TriageRow[];
+  elapsedSec: number;
+}
+
+/** Max number of triage rows to show at once; older rows scroll off with a count. */
+const TRIAGE_VISIBLE_ROWS = 10;
+
+function TriagingView({ crashCount, batchDone, totalBatches, rows, elapsedSec }: TriagingViewProps) {
+  const barWidth = 28;
+  const filled = totalBatches > 0 ? Math.round((batchDone / totalBatches) * barWidth) : 0;
+  const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
+  const stillRunning = batchDone < totalBatches;
+
+  // Show only the last TRIAGE_VISIBLE_ROWS rows; surface overflow count above them
+  const overflowCount = Math.max(0, rows.length - TRIAGE_VISIBLE_ROWS);
+  const visibleRows = rows.slice(-TRIAGE_VISIBLE_ROWS);
+
   return (
     <Box flexDirection="column" paddingX={1} paddingY={1}>
+      {/* Header */}
       <Box marginBottom={1}>
         <Text bold color="cyan">⚡ EdgeFuzz</Text>
-        <Text dimColor>  —  LLM triage</Text>
-      </Box>
-      <Box gap={2}>
-        <Spinner type="dots" />
-        <Text>
-          Triaging{' '}
-          <Text bold color="yellow">{crashCount}</Text>{' '}
-          crash{crashCount !== 1 ? 'es' : ''} — classifying root causes + grouping duplicates
-        </Text>
-      </Box>
-      <Box marginTop={1}>
+        <Text color="magenta">  [LLM triage]</Text>
         <Text dimColor>
-          Batched at 20 crashes per LLM call. Results will appear in the final report...
+          {'  —  classifying '}
+          <Text bold color="yellow">{crashCount}</Text>
+          {` crash${crashCount !== 1 ? 'es' : ''}`}
         </Text>
       </Box>
+
+      {/* Progress bar */}
+      <Box marginBottom={1}>
+        <Text color="magenta">{bar}</Text>
+        <Text>{'  '}</Text>
+        <Text bold>batch {batchDone}</Text>
+        <Text dimColor> / {totalBatches}</Text>
+        <Text dimColor>{'  '}{elapsedSec}s</Text>
+      </Box>
+
+      {/* Overflow indicator */}
+      {overflowCount > 0 && (
+        <Box>
+          <Text dimColor>  (+{overflowCount} classified above)</Text>
+        </Box>
+      )}
+
+      {/* Streaming classified crash rows */}
+      {visibleRows.map((row, i) => (
+        <TriageResultRow key={`${row.crashId}-${i}`} row={row} />
+      ))}
+
+      {/* In-flight indicator */}
+      {stillRunning && (
+        <Box marginTop={visibleRows.length > 0 ? 0 : 1}>
+          <Text color="yellow">  </Text>
+          <Spinner type="dots" />
+          <Text dimColor>  batch {batchDone + 1} / {totalBatches} running...</Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+interface TriageResultRowProps {
+  row: TriageRow;
+}
+
+function TriageResultRow({ row }: TriageResultRowProps) {
+  const rootCauseColor =
+    row.rootCause === 'sql-error' || row.rootCause === 'auth-bypass' || row.rootCause === 'injection'
+      ? 'red'
+      : row.rootCause === 'validation-missing' || row.rootCause === 'type-coercion'
+        ? 'yellow'
+        : 'white';
+
+  if (row.isDuplicate) {
+    return (
+      <Box>
+        <Text color="green">  ✓ </Text>
+        <Text bold>{row.method.padEnd(6)}</Text>
+        <Text>{row.path.padEnd(35)}</Text>
+        <Text color={rootCauseColor}>{row.rootCause.padEnd(22)}</Text>
+        <Text dimColor>  [dup]</Text>
+      </Box>
+    );
+  }
+
+  const pct = Math.round(row.confidence * 100);
+  const confColor = pct >= 80 ? 'green' : pct >= 50 ? 'yellow' : 'gray';
+
+  return (
+    <Box>
+      <Text color="green">  ✓ </Text>
+      <Text bold>{row.method.padEnd(6)}</Text>
+      <Text>{row.path.padEnd(35)}</Text>
+      <Text color={rootCauseColor}>{row.rootCause.padEnd(22)}</Text>
+      <Text color={confColor}>  {pct}%</Text>
     </Box>
   );
 }
@@ -264,7 +495,7 @@ function RunningView({
         <Box><Spinner type="dots" /><Text dimColor>  fuzzing...</Text></Box>
       </Box>
 
-      {/* Live crash list */}
+      {/* Live crash list — last 5 */}
       {crashes.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text bold color="red">Crashes Found:</Text>

@@ -63,13 +63,29 @@ export async function generateSemanticMutations(
 }
 
 /**
- * Generate semantic mutations for multiple endpoints in parallel.
- * Bounded to avoid overwhelming the LLM API rate limit.
+ * Progress callback fired once per endpoint as its LLM generation completes.
+ *
+ * @param done     Number of endpoints completed so far (1-based)
+ * @param total    Total number of endpoints being processed
+ * @param endpoint The endpoint that just finished
+ * @param count    Number of semantic mutations produced for that endpoint
+ */
+export type SemanticProgressCallback = (
+  done: number,
+  total: number,
+  endpoint: ParsedEndpoint,
+  count: number,
+) => void;
+
+/**
+ * Generate semantic mutations for multiple endpoints in parallel batches.
+ * Fires onProgress once per completed endpoint with full context.
+ * Bounded to BATCH_SIZE=5 concurrent requests to respect typical API rate limits.
  */
 export async function generateSemanticMutationsBatch(
   endpoints: ParsedEndpoint[],
   llmConfig?: LLMConfig,
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: SemanticProgressCallback,
 ): Promise<Map<string, SemanticMutation[]>> {
   const config = llmConfig ?? detectLLMProvider();
   const result = new Map<string, SemanticMutation[]>();
@@ -88,10 +104,11 @@ export async function generateSemanticMutationsBatch(
 
     for (let j = 0; j < batch.length; j++) {
       const ep = batch[j]!;
+      const mutations = batchResults[j] ?? [];
       const key = `${ep.method}:${ep.path}`;
-      result.set(key, batchResults[j] ?? []);
+      result.set(key, mutations);
       done++;
-      onProgress?.(done, endpoints.length);
+      onProgress?.(done, endpoints.length, ep, mutations.length);
     }
   }
 

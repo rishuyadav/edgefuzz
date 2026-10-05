@@ -90,8 +90,11 @@ export async function runFuzzSession(
   const mutations = await generateMutations(filteredSpec, {
     llmMutations: useLlmMutations,
     llmConfig: llmConfig ?? undefined,
+    // Fire a per-endpoint event as each LLM call completes so the TUI can
+    // render a live checklist of which endpoints have been processed.
     onLlmProgress: useLlmMutations
-      ? (done, total) => emit({ type: 'llm_mutations_ready', count: done })
+      ? (done, total, endpoint, count) =>
+          emit({ type: 'llm_mutation_endpoint_done', method: endpoint.method, path: endpoint.path, count, done, total })
       : undefined,
   });
 
@@ -173,7 +176,12 @@ export async function runFuzzSession(
 
   if (useLlmTriage && llmConfig) {
     emit({ type: 'triage_start', crashCount: dedupedCrashes.length });
-    await triageCrashes(dedupedCrashes, llmConfig);
+    // Pass onBatchDone so the TUI receives partial results in real time,
+    // rendering classified crashes as each batch of 20 completes rather than
+    // waiting for the full triage run to finish.
+    await triageCrashes(dedupedCrashes, llmConfig, (batchIndex, totalBatches, results) => {
+      emit({ type: 'triage_batch_done', batchIndex, totalBatches, results });
+    });
     const duplicateCount = dedupedCrashes.filter((c) => c.duplicateOf !== undefined).length;
     emit({ type: 'triage_done', duplicateCount });
   }

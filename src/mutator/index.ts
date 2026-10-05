@@ -23,6 +23,7 @@ import { structuralMutations } from './structural.js';
 import { encodingMutations } from './encoding.js';
 import {
   generateSemanticMutationsBatch,
+  type SemanticProgressCallback,
   type LLMConfig,
 } from './semantic.js';
 
@@ -38,8 +39,12 @@ export interface GenerateMutationsOptions {
    */
   llmMutations?: boolean;
   llmConfig?: LLMConfig;
-  /** Progress callback for the LLM generation phase */
-  onLlmProgress?: (done: number, total: number) => void;
+  /**
+   * Progress callback fired once per endpoint as its LLM generation completes.
+   * Receives (done, total, endpoint, mutationCount) — the full context needed
+   * to emit a rich per-endpoint progress event to the TUI/CI reporter.
+   */
+  onLlmProgress?: SemanticProgressCallback;
 }
 
 /**
