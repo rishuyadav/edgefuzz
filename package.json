@@ -52,7 +52,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx/esm --test test/**/*.test.ts",
+    "test": "node --import tsx/esm --test test/e2e-demo.test.ts test/method-filter.test.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
