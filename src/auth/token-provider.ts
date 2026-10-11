@@ -9,10 +9,15 @@
  *   - JSON object:      must have a "token" or "access_token" field
  *                       (e.g. `curl -s .../token | jq .access_token`)
  *
+ * Concurrency safety:
+ *   When many requests complete with 401 simultaneously, only ONE refresh
+ *   command is executed. All other callers await the same refresh promise
+ *   rather than spawning competing subprocesses.
+ *
  * Usage:
  *   const provider = new TokenProvider('curl -s -X POST .../oauth/token -d "..."');
- *   const token = await provider.getToken();   // "Bearer eyJ..."
- *   await provider.handleUnauthorized();       // re-runs command, refreshes cache
+ *   await provider.getToken();           // "eyJ..."  (fetched on first call)
+ *   await provider.handleUnauthorized(); // re-runs once, returns new token
  */
 
 import { execSync } from 'child_process';
@@ -20,6 +25,18 @@ import { execSync } from 'child_process';
 export class TokenProvider {
   private readonly command: string;
   private cachedToken: string | null = null;
+
+  /**
+   * Tracks a pending initial-fetch or refresh so concurrent callers
+   * all await the same operation rather than running the command N times.
+   */
+  private pendingFetch: Promise<string> | null = null;
+
+  /**
+   * Set to true after the first successful refresh to prevent a second one.
+   * A session refreshes at most once: repeated 401s after a successful refresh
+   * indicate a misconfigured token command, not token expiry.
+   */
   private refreshed = false;
 
   constructor(command: string) {
@@ -28,25 +45,48 @@ export class TokenProvider {
 
   /**
    * Return the cached token (fetching it on first call).
-   * Returns the token string without the "Bearer " prefix.
+   * Thread-safe: concurrent calls share a single pending fetch.
    */
   async getToken(): Promise<string> {
-    if (this.cachedToken === null) {
-      this.cachedToken = await this.runCommand();
-    }
-    return this.cachedToken;
+    if (this.cachedToken !== null) return this.cachedToken;
+
+    // If a fetch is already in flight, piggyback on it
+    if (this.pendingFetch !== null) return this.pendingFetch;
+
+    this.pendingFetch = this.runCommand().then((token) => {
+      this.cachedToken = token;
+      this.pendingFetch = null;
+      return token;
+    });
+
+    return this.pendingFetch;
   }
 
   /**
    * Called when the server returns 401.
-   * Re-runs the auth command once per session to handle token expiry.
-   * Subsequent calls within the same run are no-ops.
+   * Re-runs the auth command at most once per session to handle token expiry.
+   * Concurrent callers all await the same refresh promise — only one subprocess
+   * is spawned regardless of how many 401s arrive simultaneously.
+   *
+   * Returns the new token, or null if a refresh already happened (no-op).
    */
   async handleUnauthorized(): Promise<string | null> {
     if (this.refreshed) return this.cachedToken;
+
+    // If a refresh is already underway (another concurrent 401 started it),
+    // wait for it instead of spawning a duplicate subprocess.
+    if (this.pendingFetch !== null) return this.pendingFetch;
+
     this.refreshed = true;
-    this.cachedToken = await this.runCommand();
-    return this.cachedToken;
+    this.cachedToken = null; // clear stale token before refresh
+
+    this.pendingFetch = this.runCommand().then((token) => {
+      this.cachedToken = token;
+      this.pendingFetch = null;
+      return token;
+    });
+
+    return this.pendingFetch;
   }
 
   /**
@@ -55,9 +95,13 @@ export class TokenProvider {
    */
   async getAuthHeader(): Promise<string> {
     const token = await this.getToken();
-    // If the token already starts with "Bearer " don't double-prefix it
+    // Avoid double-prefixing when the command already returns "Bearer <token>"
     return token.startsWith('Bearer ') ? token : `Bearer ${token}`;
   }
+
+  // ---------------------------------------------------------------------------
+  // Internal
+  // ---------------------------------------------------------------------------
 
   private async runCommand(): Promise<string> {
     let output: string;
@@ -107,8 +151,7 @@ export class TokenProvider {
       }
     }
 
-    // Treat as plain bearer token
-    // Strip surrounding quotes if the shell command returns a quoted string
+    // Treat as plain bearer token; strip surrounding quotes if any
     return output.replace(/^["']|["']$/g, '');
   }
 }

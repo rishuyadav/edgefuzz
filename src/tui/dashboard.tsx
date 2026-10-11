@@ -23,7 +23,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, Newline, useApp } from 'ink';
 import Spinner from 'ink-spinner';
-import type { ProgressEvent, CrashFinding, FuzzReport, CrashTriageResult } from '../types/index.js';
+import type { ProgressEvent, CrashFinding, FuzzReport, CrashTriageResult, PreflightSummary } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,7 +35,7 @@ interface DashboardProps {
   events: AsyncIterable<ProgressEvent>;
 }
 
-type Phase = 'preparing' | 'running' | 'triaging' | 'done';
+type Phase = 'preflight' | 'preparing' | 'running' | 'triaging' | 'done';
 
 interface EndpointResult {
   method: string;
@@ -61,7 +61,8 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
   const { exit } = useApp();
 
   // --- Phase ---
-  const [phase, setPhase] = useState<Phase>('running');
+  const [phase, setPhase] = useState<Phase>('preflight');
+  const [preflight, setPreflight] = useState<PreflightSummary | null>(null);
 
   // --- Fuzzing state ---
   const [totalRequests, setTotalRequests] = useState(0);
@@ -115,6 +116,15 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
       for await (const event of events) {
         switch (event.type) {
 
+          case 'preflight':
+            setPreflight(event.summary);
+            if (event.summary.dryRun) {
+              // Dry run: stay in preflight phase; 'done' will follow immediately
+            } else {
+              // Brief preflight display — transition to next phase on the next event
+            }
+            break;
+
           case 'llm_mutations_generating':
             setPhase('preparing');
             setPreparingTotal(event.endpointCount);
@@ -135,7 +145,7 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
           case 'start':
             setTotalRequests(event.totalRequests);
             setLlmEnabled(event.llmEnabled);
-            setPhase('running');
+            setPhase(event.llmEnabled ? 'preparing' : 'running');
             // Reset fuzz timer at the moment fuzzing actually starts
             // (after any LLM mutation generation completes)
             startTimeRef.current = Date.now();
@@ -185,6 +195,10 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
             break;
           }
 
+          case 'diagnostics':
+            // Transport-error warnings are surfaced in CI mode; TUI shows summary counts
+            break;
+
           case 'triage_done':
             // triage_done just signals completion; phase transitions via 'done'
             break;
@@ -195,7 +209,8 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
             triagingStartRef.current = null;
             setReport(event.report);
             setPhase('done');
-            setTimeout(() => exit(), 100);
+            // Short delay lets the final render paint before Ink exits
+            setTimeout(() => exit(), 200);
             break;
         }
       }
@@ -206,6 +221,21 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
   }, [events, exit]);
 
   // --- Render by phase ---
+
+  if (phase === 'preflight' && preflight) {
+    return <PreflightView summary={preflight} />;
+  }
+
+  if (phase === 'preflight') {
+    // Still waiting for the preflight event — show a brief connecting state
+    return (
+      <Box paddingX={1} paddingY={1}>
+        <Text bold color="cyan">⚡ EdgeFuzz  </Text>
+        <Spinner type="dots" />
+        <Text dimColor>  Loading spec...</Text>
+      </Box>
+    );
+  }
 
   if (phase === 'preparing') {
     return (
@@ -246,6 +276,62 @@ export function Dashboard({ target, specSource, events }: DashboardProps) {
   }
 
   return <SummaryView report={report!} crashes={crashes} />;
+}
+
+// ---------------------------------------------------------------------------
+// Preflight view — spec summary before any requests are sent
+// ---------------------------------------------------------------------------
+
+function PreflightView({ summary: s }: { summary: PreflightSummary }) {
+  const uniqueMethods = [...new Set(s.operations.map((o) => o.method))].sort().join(', ');
+
+  return (
+    <Box flexDirection="column" paddingX={1} paddingY={1}>
+      <Box marginBottom={1}>
+        <Text bold color="cyan">⚡ EdgeFuzz  </Text>
+        <Spinner type="dots" />
+        <Text dimColor>  Preparing scan...</Text>
+      </Box>
+
+      <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={2} paddingY={0}>
+        <Box>
+          <Text dimColor>Spec        </Text>
+          <Text color="white">{truncate(s.specSource, 60)}</Text>
+        </Box>
+        <Box>
+          <Text dimColor>Endpoints   </Text>
+          <Text bold>{s.filteredOperations}</Text>
+          {s.filteredOperations < s.totalOperations && (
+            <Text dimColor>  ({s.totalOperations - s.filteredOperations} filtered out)</Text>
+          )}
+        </Box>
+        <Box>
+          <Text dimColor>Requests    </Text>
+          <Text bold>~{s.estimatedRequests}</Text>
+          {s.llmMutations && <Text color="magenta">  + LLM semantic (count TBD)</Text>}
+        </Box>
+        <Box>
+          <Text dimColor>Methods     </Text>
+          <Text>{uniqueMethods}</Text>
+        </Box>
+        {s.writeMethods.length > 0 && (
+          <Box>
+            <Text dimColor>⚠ Write ops </Text>
+            <Text color="yellow">{s.writeMethods.join(', ')} will send mutating requests</Text>
+          </Box>
+        )}
+        <Box>
+          <Text dimColor>Concurrency </Text>
+          <Text>{s.concurrency}</Text>
+        </Box>
+        {s.dryRun && (
+          <Box>
+            <Text color="cyan">Dry run — no requests will be sent</Text>
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
 }
 
 // ---------------------------------------------------------------------------

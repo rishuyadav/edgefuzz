@@ -1,7 +1,16 @@
 name: EdgeFuzz API Audit
 
-# This workflow shows how to use EdgeFuzz as a CI/CD quality gate.
-# Copy this into your own project and configure the inputs below.
+# Example workflow: shows how to add EdgeFuzz as a CI/CD quality gate.
+# Copy this file into your own project and adjust the steps below.
+#
+# What it does:
+#   1. Start your API server (fill in the commented block).
+#   2. Wait until it is ready to accept connections.
+#   3. Run EdgeFuzz — exits with code 1 if any unhandled 500 crashes are found.
+#   4. Upload the structured JSON report as a build artifact.
+#
+# Required secret (optional, enables LLM crash analysis):
+#   OPENAI_API_KEY — set in Settings → Secrets → Actions
 
 on:
   pull_request:
@@ -21,31 +30,54 @@ jobs:
         with:
           node-version: '20.x'
 
-      # Start your API server here. Example for a Node.js app:
+      # -----------------------------------------------------------------------
+      # 1. Start your API server.
+      #    Replace the example below with whatever starts your application.
+      #
+      # - name: Install dependencies
+      #   run: npm ci
+      #
       # - name: Start API server
       #   run: npm start &
       #   env:
       #     NODE_ENV: test
+      #     DATABASE_URL: sqlite::memory:
+      # -----------------------------------------------------------------------
 
-      # Wait for the server to be ready
+      # -----------------------------------------------------------------------
+      # 2. Wait until the server is ready to accept connections.
+      #    Adjust the URL and timeout to match your setup.
+      #
       # - name: Wait for server
-      #   run: npx wait-on http://localhost:8080/health --timeout 30000
+      #   run: npx wait-on http://localhost:8080/health --timeout 60000
+      # -----------------------------------------------------------------------
+
+      # -----------------------------------------------------------------------
+      # 3. (Optional) Preview what EdgeFuzz will scan — useful for auditing new
+      #    workflows before enabling the full scan.
+      #
+      # - name: EdgeFuzz preflight
+      #   run: |
+      #     npx edgefuzz@latest \
+      #       http://localhost:8080 \
+      #       --spec http://localhost:8080/openapi.json \
+      #       --dry-run
+      # -----------------------------------------------------------------------
 
       - name: Run EdgeFuzz Audit
         run: |
           npx edgefuzz@latest \
             http://localhost:8080 \
-            http://localhost:8080/openapi.json \
-            --ci \
+            --spec http://localhost:8080/openapi.json \
             --concurrency 10 \
             --output edgefuzz-report.json
-        # Exit code 1 = crashes found → CI step fails → PR is blocked
-        # Uncomment the line below to NOT fail CI (report-only mode):
-        # continue-on-error: true
+        # Exit code 1 = crashes found → CI step fails → PR is blocked.
+        # To report findings without blocking the PR, add:
+        #   continue-on-error: true
         env:
-          # Optional: enable LLM fix suggestions
-          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_KEY: ""
+          # Optional: enable LLM semantic mutations and crash triage.
+          # Remove or leave empty to use static-only mode (no API cost).
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
       - name: Upload EdgeFuzz Report
         if: always()

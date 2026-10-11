@@ -13,7 +13,7 @@
  */
 
 import { parseSpec } from './parser/openapi.js';
-import { generateMutations } from './mutator/index.js';
+import { generateMutations, countStaticMutations } from './mutator/index.js';
 import { executeRequests } from './runner/executor.js';
 import { analyseCrash, deduplicateFindings } from './analyzer/crash.js';
 import { analyseResponse } from './analyzer/response.js';
@@ -27,6 +27,9 @@ import type {
   CrashFinding,
   ResponseMismatch,
   FuzzReport,
+  HttpMethod,
+  PreflightSummary,
+  RunDiagnostics,
 } from './types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -60,7 +63,7 @@ export async function runFuzzSession(
   // ------------------------------------------------------------------
   const spec = await parseSpec(config.specPath, config.targetUrl);
 
-  // Apply path filters
+  // Apply path and method filters
   let endpoints = spec.endpoints;
   if (config.includePaths && config.includePaths.length > 0) {
     endpoints = endpoints.filter((e) =>
@@ -72,7 +75,55 @@ export async function runFuzzSession(
       (e) => !config.excludePaths!.some((prefix) => e.path.startsWith(prefix)),
     );
   }
+  if (config.includeMethods && config.includeMethods.length > 0) {
+    const methods = new Set(config.includeMethods);
+    endpoints = endpoints.filter((e) => methods.has(e.method));
+  }
   const filteredSpec = { ...spec, endpoints };
+
+  // ------------------------------------------------------------------
+  // Preflight summary — emitted before any mutations or requests
+  // ------------------------------------------------------------------
+
+  const WRITE_METHODS: HttpMethod[] = ['POST', 'PUT', 'PATCH', 'DELETE'];
+  const activatedWriteMethods = filteredSpec.endpoints
+    .map((e) => e.method)
+    .filter((m): m is HttpMethod => WRITE_METHODS.includes(m))
+    .filter((m, i, arr) => arr.indexOf(m) === i)  // deduplicate
+    .sort();
+
+  const estimatedRequests = countStaticMutations(filteredSpec.endpoints);
+
+  const preflight: PreflightSummary = {
+    specSource: filteredSpec.specSource,
+    totalOperations: spec.endpoints.length,
+    filteredOperations: filteredSpec.endpoints.length,
+    estimatedRequests,
+    writeMethods: activatedWriteMethods,
+    concurrency: config.concurrency,
+    llmMutations: config.llmMutations && llmEnabled,
+    llmTriage: (config.llmTriage ?? false) && llmEnabled,
+    dryRun: config.dryRun ?? false,
+    operations: filteredSpec.endpoints.map((e) => ({ method: e.method, path: e.path })),
+  };
+
+  emit({ type: 'preflight', summary: preflight });
+
+  // Dry run: stop here — no mutations generated, no requests sent.
+  if (config.dryRun) {
+    const report = buildReport({
+      spec: filteredSpec,
+      crashes: [],
+      mismatches: [],
+      totalRequests: 0,
+      llmMutationCount: 0,
+      llmEnabled,
+      durationMs: Date.now() - startTime,
+      triageEnabled: false,
+    });
+    emit({ type: 'done', report });
+    return report;
+  }
 
   // ------------------------------------------------------------------
   // Stage 2: Generate mutations (static + optional LLM semantic)
@@ -127,6 +178,16 @@ export async function runFuzzSession(
   const seenCrashIds = new Set<string>();
   const seenMismatchIds = new Set<string>();
 
+  // Diagnostics counters — distinguish server crashes from transport failures
+  const diag: RunDiagnostics = {
+    serverErrors: 0,
+    timeouts: 0,
+    transportErrors: 0,
+    clientErrors: 0,
+    successResponses: 0,
+    total: 0,
+  };
+
   await executeRequests(mutations, {
     concurrency: config.concurrency,
     timeoutMs: config.timeoutMs,
@@ -135,6 +196,30 @@ export async function runFuzzSession(
     requestDelay: config.requestDelay,
     onResult: (result) => {
       emit({ type: 'request_done', result });
+
+      // Track outcome for diagnostics
+      diag.total += 1;
+      if (result.timedOut) {
+        diag.timeouts += 1;
+      } else if (result.networkError) {
+        // Distinguish pre-connection failures (ECONNREFUSED = server not running)
+        // from mid-connection failures (server crashed mid-response)
+        const code = (result.networkErrorCode ?? '').toUpperCase();
+        const msg = (result.networkErrorMessage ?? '').toLowerCase();
+        const isPreConnect = code === 'ECONNREFUSED' || msg.includes('econnrefused');
+        if (isPreConnect) {
+          diag.transportErrors += 1;
+        } else {
+          // Server accepted the connection then died — counts as a server-side failure
+          diag.serverErrors += 1;
+        }
+      } else if (result.statusCode >= 500) {
+        diag.serverErrors += 1;
+      } else if (result.statusCode >= 400) {
+        diag.clientErrors += 1;
+      } else {
+        diag.successResponses += 1;
+      }
 
       // Crash detection (5xx / timeout / network error)
       const crash = analyseCrash(result);
@@ -158,6 +243,9 @@ export async function runFuzzSession(
       }
     },
   });
+
+  // Emit a diagnostics event so reporters can surface it
+  emit({ type: 'diagnostics', diag });
 
   // ------------------------------------------------------------------
   // Stage 4: Deduplicate
@@ -200,6 +288,7 @@ export async function runFuzzSession(
     llmEnabled,
     durationMs,
     triageEnabled: useLlmTriage,
+    diagnostics: diag,
   });
 
   if (config.reportPath !== false) {

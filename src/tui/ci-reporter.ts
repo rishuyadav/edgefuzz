@@ -19,6 +19,29 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
 
   for await (const event of events) {
     switch (event.type) {
+      case 'preflight': {
+        const s = event.summary;
+        console.log(chalk.dim('─'.repeat(60)));
+        console.log(chalk.bold('⚡ EdgeFuzz Preflight'));
+        console.log(chalk.dim(`  Spec     : ${s.specSource}`));
+        console.log(chalk.dim(`  Endpoints: ${s.filteredOperations} selected`) +
+          (s.filteredOperations < s.totalOperations
+            ? chalk.dim(` (${s.totalOperations - s.filteredOperations} filtered out)`)
+            : ''));
+        console.log(chalk.dim(`  Requests : ~${s.estimatedRequests}`) +
+          (s.llmMutations ? chalk.magenta(' + LLM semantic (count TBD)') : ''));
+        console.log(chalk.dim(`  Methods  : ${s.operations.map(o => o.method).filter((m, i, a) => a.indexOf(m) === i).join(', ')}`));
+        if (s.writeMethods.length > 0) {
+          console.log(chalk.yellow(`  ⚠ Write methods included: ${s.writeMethods.join(', ')} — will send mutating requests`));
+        }
+        console.log(chalk.dim(`  Concurrency: ${s.concurrency}`));
+        if (s.dryRun) {
+          console.log(chalk.cyan('  Dry run — no requests will be sent.'));
+        }
+        console.log(chalk.dim('─'.repeat(60)));
+        break;
+      }
+
       case 'llm_mutations_generating':
         console.log(
           chalk.magenta(`[EdgeFuzz] LLM generating semantic mutations for ${event.endpointCount} endpoint${event.endpointCount !== 1 ? 's' : ''}...`),
@@ -135,6 +158,24 @@ export async function runCiReporter(events: AsyncIterable<ProgressEvent>): Promi
           console.log(
             chalk.dim(`  ${r.rootCause.padEnd(22)}`) + dupNote,
           );
+        }
+        break;
+      }
+
+      case 'diagnostics': {
+        const { diag } = event;
+        if (diag.total > 0 && diag.transportErrors > 0) {
+          const pct = Math.round((diag.transportErrors / diag.total) * 100);
+          if (pct >= 50) {
+            process.stdout.write('\n');
+            console.log(
+              chalk.yellow(
+                `[EdgeFuzz] Warning: ${pct}% of requests failed before reaching the application ` +
+                `(ECONNREFUSED / transport error). ` +
+                `Verify the server is running and reachable at the target URL.`,
+              ),
+            );
+          }
         }
         break;
       }

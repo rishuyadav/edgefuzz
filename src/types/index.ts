@@ -290,6 +290,8 @@ export interface FuzzReport {
     totalDuplicates?: number;
     durationMs: number;
     requestsPerSecond: number;
+    /** Breakdown of request outcomes — distinguishes app crashes from transport failures */
+    diagnostics: RunDiagnostics;
   };
   crashes: CrashFinding[];
   /** Response contract violations (wrong types, missing fields, data leakage) */
@@ -336,6 +338,12 @@ export interface EdgeFuzzConfig {
   /** Skip endpoints matching these path prefixes */
   excludePaths?: string[];
   /**
+   * Restrict fuzzing to specific HTTP methods (e.g. ['GET', 'POST']).
+   * When set, only operations whose method is in this list are fuzzed.
+   * Method names must be uppercase. Default: all methods.
+   */
+  includeMethods?: HttpMethod[];
+  /**
    * Shell command to run to obtain a bearer token.
    * Output must be either a plain string (the token) or JSON with a "token" field.
    * Re-run automatically on 401 responses (once per run) to handle token expiry.
@@ -371,13 +379,72 @@ export interface EdgeFuzzConfig {
    * Requires OPENAI_API_KEY or ANTHROPIC_API_KEY (same as --llm-mutations).
    */
   llmTriage?: boolean;
+  /**
+   * When true, parse the spec and print a preflight summary then exit immediately
+   * without sending any HTTP requests. Useful for verifying configuration before
+   * committing to a long scan.
+   * Default: false.
+   */
+  dryRun?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Preflight summary — computed before any requests are sent
+// ---------------------------------------------------------------------------
+
+/**
+ * Summary of what EdgeFuzz would do before requests are sent.
+ * Emitted as a `preflight` ProgressEvent and printed in both TUI and CI modes.
+ */
+export interface PreflightSummary {
+  /** Resolved spec URL or file path */
+  specSource: string;
+  /** Total operations found in the spec */
+  totalOperations: number;
+  /** Operations that will be fuzzed after applying include/exclude/method filters */
+  filteredOperations: number;
+  /** Number of HTTP requests that will be sent (static mutation count) */
+  estimatedRequests: number;
+  /** Methods that modify state and are included in this scan */
+  writeMethods: HttpMethod[];
+  /** Effective concurrency level */
+  concurrency: number;
+  /** Whether LLM mutations are enabled */
+  llmMutations: boolean;
+  /** Whether LLM triage is enabled */
+  llmTriage: boolean;
+  /** Whether this is a dry run (no requests will be sent) */
+  dryRun: boolean;
+  /** Operations selected for fuzzing (method + path pairs) */
+  operations: Array<{ method: HttpMethod; path: string }>;
 }
 
 // ---------------------------------------------------------------------------
 // Progress event types (used by TUI / CI reporter)
 // ---------------------------------------------------------------------------
 
+/**
+ * Counts of requests by outcome, collected as the run progresses.
+ * Distinguishes real server-side crashes from infrastructure failures.
+ */
+export interface RunDiagnostics {
+  /** Requests that got a 5xx response (application crashes) */
+  serverErrors: number;
+  /** Requests that timed out (server hung) */
+  timeouts: number;
+  /** Requests that failed at the transport layer before reaching the app
+   * (ECONNREFUSED, connection reset after initial connect, etc.) */
+  transportErrors: number;
+  /** Requests that got a 4xx (handled correctly — not crashes) */
+  clientErrors: number;
+  /** Requests that got a 2xx/3xx (healthy responses) */
+  successResponses: number;
+  /** Total requests attempted */
+  total: number;
+}
+
 export type ProgressEvent =
+  | { type: 'preflight'; summary: PreflightSummary }
   | { type: 'start'; totalRequests: number; totalEndpoints: number; llmEnabled: boolean }
   | { type: 'llm_mutations_generating'; endpointCount: number }
   // Fired once per endpoint as LLM mutation generation completes for it.
@@ -392,4 +459,5 @@ export type ProgressEvent =
   // Carries the partial results so the TUI can render classified crashes in real time.
   | { type: 'triage_batch_done'; batchIndex: number; totalBatches: number; results: CrashTriageResult[] }
   | { type: 'triage_done'; duplicateCount: number }
+  | { type: 'diagnostics'; diag: RunDiagnostics }
   | { type: 'done'; report: FuzzReport };

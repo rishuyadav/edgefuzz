@@ -9,7 +9,7 @@
 
 import { writeFile } from 'fs/promises';
 import path from 'path';
-import type { FuzzReport, CrashFinding, ResponseMismatch, ParsedSpec } from '../types/index.js';
+import type { FuzzReport, CrashFinding, ResponseMismatch, ParsedSpec, RunDiagnostics } from '../types/index.js';
 
 export interface ReportInput {
   spec: ParsedSpec;
@@ -21,13 +21,20 @@ export interface ReportInput {
   durationMs: number;
   /** Whether --triage was used; if true, totalDuplicates is computed and included */
   triageEnabled?: boolean;
+  /** Outcome breakdown collected during request execution */
+  diagnostics?: RunDiagnostics;
 }
 
 /**
  * Build the structured FuzzReport object from a completed fuzzing session.
  */
+const EMPTY_DIAGNOSTICS: import('../types/index.js').RunDiagnostics = {
+  serverErrors: 0, timeouts: 0, transportErrors: 0,
+  clientErrors: 0, successResponses: 0, total: 0,
+};
+
 export function buildReport(input: ReportInput): FuzzReport {
-  const { spec, crashes, mismatches, totalRequests, llmMutationCount, llmEnabled, durationMs, triageEnabled } = input;
+  const { spec, crashes, mismatches, totalRequests, llmMutationCount, llmEnabled, durationMs, triageEnabled, diagnostics } = input;
   const requestsPerSecond =
     durationMs > 0 ? Math.round((totalRequests / durationMs) * 1000) : 0;
 
@@ -51,6 +58,7 @@ export function buildReport(input: ReportInput): FuzzReport {
       ...(totalDuplicates !== undefined ? { totalDuplicates } : {}),
       durationMs,
       requestsPerSecond,
+      diagnostics: diagnostics ?? EMPTY_DIAGNOSTICS,
     },
     crashes,
     mismatches,

@@ -10,7 +10,44 @@ import type { MutatedRequest } from '../types/index.js';
 const RAW_JSON_PREFIX = '__RAW_JSON__:';
 
 /**
+ * Header names that carry credentials and must be redacted in shared output.
+ * Matching is case-insensitive.
+ */
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'x-api-key',
+  'x-auth-token',
+  'api-key',
+  'token',
+  'cookie',
+]);
+
+/**
+ * Redact a header value if the header name is known to carry credentials.
+ * Preserves the scheme prefix (e.g. "Bearer ") so the reproducer remains
+ * runnable after the user substitutes their real token.
+ *
+ * Example:
+ *   "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+ *   → "Bearer <REDACTED>"
+ */
+function redactHeaderValue(name: string, value: string): string {
+  if (!SENSITIVE_HEADER_NAMES.has(name.toLowerCase())) return value;
+  // Preserve scheme prefix (Bearer, Basic, Token, etc.) for clarity
+  const spaceIdx = value.indexOf(' ');
+  if (spaceIdx !== -1) {
+    const scheme = value.slice(0, spaceIdx);
+    return `${scheme} <REDACTED>`;
+  }
+  return '<REDACTED>';
+}
+
+/**
  * Build a shell-safe `curl` command for a MutatedRequest.
+ *
+ * Sensitive header values (Authorization, X-Api-Key, etc.) are redacted
+ * so the reproducer is safe to share in bug reports and CI logs.
+ * The user should substitute their own credentials before running it.
  */
 export function buildCurlReproducer(req: MutatedRequest): string {
   const parts: string[] = ['curl', '-i', '-X', req.method];
@@ -19,7 +56,8 @@ export function buildCurlReproducer(req: MutatedRequest): string {
   for (const [key, value] of Object.entries(req.headers)) {
     // Skip Content-Length — curl computes it automatically
     if (key.toLowerCase() === 'content-length') continue;
-    parts.push(`-H ${shellQuote(`${key}: ${value}`)}`);
+    const safeValue = redactHeaderValue(key, value);
+    parts.push(`-H ${shellQuote(`${key}: ${safeValue}`)}`);
   }
 
   // Body

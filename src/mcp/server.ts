@@ -9,13 +9,18 @@
  * Transport: stdio (standard MCP transport)
  */
 
+import { createRequire } from 'module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { runFuzzSession } from '../engine.js';
 import type { EdgeFuzzConfig, FuzzReport } from '../types/index.js';
 
-const SERVER_VERSION = '1.0.0';
+// Derive server version from package.json so it stays in sync with npm releases.
+const _require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const pkg = _require('../../package.json') as any;
+const SERVER_VERSION: string = pkg.version as string;
 
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({
@@ -128,6 +133,13 @@ export async function startMcpServer(): Promise<void> {
       headers: z.record(z.string()).optional().describe('Additional request headers'),
     },
     async (params) => {
+      // Build the method filter: when method is specified, only that method is fuzzed.
+      // Cast is safe — zod has already validated against the enum literals above.
+      type AllowedMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+      const methodFilter = params.method
+        ? [params.method as AllowedMethod]
+        : undefined;
+
       const config: EdgeFuzzConfig = {
         targetUrl: params.target_url,
         specPath: params.spec_url,
@@ -137,6 +149,7 @@ export async function startMcpServer(): Promise<void> {
         ci: true,
         headers: params.headers ?? {},
         includePaths: [params.path],
+        includeMethods: methodFilter,
         llmMutations: false,
       };
 

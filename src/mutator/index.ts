@@ -48,6 +48,21 @@ export interface GenerateMutationsOptions {
 }
 
 /**
+ * Count how many static mutations would be generated for a set of endpoints,
+ * without allocating the full MutatedRequest objects.
+ *
+ * Used by the preflight summary to estimate request volume before any I/O.
+ */
+export function countStaticMutations(endpoints: ParsedEndpoint[]): number {
+  let total = 0;
+  for (const endpoint of endpoints) {
+    // Generate and count — this is pure CPU work, no I/O
+    total += mutateEndpointStatic(endpoint, 'http://count-only').length;
+  }
+  return total;
+}
+
+/**
  * Generate the full set of adversarial requests for an entire parsed spec.
  *
  * In static-only mode (default): synchronous, zero API cost.

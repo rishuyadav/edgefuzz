@@ -105,15 +105,23 @@ export async function parseSpec(specPath: string | undefined, targetBaseUrl: str
 }
 
 /**
- * Attempt to discover an OpenAPI spec on localhost without a user-supplied path.
- * Returns the spec URL and parsed content of the first spec found.
+ * Attempt to discover an OpenAPI spec for a given target URL.
+ *
+ * Only probes the host and port from `targetBaseUrl`. It never falls back to
+ * other localhost ports — doing so could silently scan a different service
+ * (e.g. a local dev server when the intended target is a staging environment).
+ *
+ * The common-port sweep is only performed when the target host is exactly
+ * "localhost" or "127.0.0.1" AND no explicit port was provided (i.e. port is
+ * the protocol default — 80 for http, 443 for https), so that plain
+ * `edgefuzz http://localhost` without a port remains convenient.
  */
 export async function discoverSpec(targetBaseUrl: string): Promise<string> {
   const base = targetBaseUrl.replace(/\/$/, '');
 
   process.stderr.write(`  Searching for OpenAPI spec at ${base}...\n`);
 
-  // If a targetBaseUrl is given, probe its known paths first
+  // Always probe the explicitly-supplied host first
   for (const specPath of DISCOVERY_PATHS) {
     const url = `${base}${specPath}`;
     try {
@@ -127,18 +135,27 @@ export async function discoverSpec(targetBaseUrl: string): Promise<string> {
     }
   }
 
-  // If not found on the given host, sweep common localhost ports
-  for (const port of DISCOVERY_PORTS) {
-    for (const specPath of DISCOVERY_PATHS) {
-      const url = `http://localhost:${port}${specPath}`;
-      try {
-        const found = await probeUrl(url);
-        if (found) {
-          process.stderr.write(`  Found spec at ${url}\n\n`);
-          return url;
+  // Only sweep common ports when the user supplied a bare localhost URL with no port.
+  // Rationale: if you typed `edgefuzz http://localhost`, you almost certainly meant
+  // "find my local server". If you typed `edgefuzz http://staging.example.com:8080`,
+  // falling back to localhost:3000 would fuzz the wrong service — a silent foot-gun.
+  const parsedTarget = new URL(base);
+  const isLocalhost = parsedTarget.hostname === 'localhost' || parsedTarget.hostname === '127.0.0.1';
+  const hasExplicitPort = parsedTarget.port !== '';
+
+  if (isLocalhost && !hasExplicitPort) {
+    for (const port of DISCOVERY_PORTS) {
+      for (const specPath of DISCOVERY_PATHS) {
+        const url = `http://localhost:${port}${specPath}`;
+        try {
+          const found = await probeUrl(url);
+          if (found) {
+            process.stderr.write(`  Found spec at ${url}\n\n`);
+            return url;
+          }
+        } catch {
+          // continue
         }
-      } catch {
-        // continue
       }
     }
   }

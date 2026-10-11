@@ -13,7 +13,7 @@ Point it at any OpenAPI 3.x server — no config files, no API key, no setup. Fi
 
 ## Quickstart
 
-> **Requires:** Node.js 18+. First run downloads ~15 MB of dependencies (~20s); subsequent runs are instant.
+> **Requires:** Node.js 20.18.1+. First run downloads ~15 MB of dependencies (~20s); subsequent runs are instant.
 
 ### Try it right now — no server needed
 
@@ -36,6 +36,9 @@ npx edgefuzz http://localhost:8080
 # Provide the spec explicitly (skip auto-discovery)
 npx edgefuzz http://localhost:8080 --spec ./openapi.yaml
 npx edgefuzz http://localhost:8080 --spec http://localhost:8080/api-docs
+
+# Preview what would be scanned without sending requests
+npx edgefuzz http://localhost:8080 --spec ./openapi.yaml --dry-run
 
 # Add LLM semantic mutations (domain-aware payloads)
 OPENAI_API_KEY=sk-... npx edgefuzz http://localhost:8080 --llm-mutations
@@ -260,6 +263,8 @@ Options:
   --llm-mutations               Enable LLM semantic mutations. Requires key.
   --triage                      Enable LLM crash triage after fuzzing. Requires key.
                                 Only runs if crashes are found — zero calls on clean audits.
+  --dry-run                     Parse the spec, print the preflight summary, then exit.
+                                No HTTP requests are sent. Useful for auditing scan scope.
   -h, --help                    Display help
 ```
 

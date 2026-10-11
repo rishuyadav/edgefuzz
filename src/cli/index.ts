@@ -84,7 +84,11 @@ program
   )
   .option('--tls-insecure', 'Skip TLS certificate verification (for self-signed certs in dev/staging)')
   .option('--delay <ms>', 'Delay between requests in ms — prevents rate limiting (default: 0)')
-  .option('--no-response-validation', 'Disable response schema validation (faster, crash-only mode)');
+  .option('--no-response-validation', 'Disable response schema validation (faster, crash-only mode)')
+  .option(
+    '--dry-run',
+    'Parse the spec and show the preflight summary (endpoints, request count, methods) then exit without sending any requests.',
+  );
 
 program.addHelpText(
   'after',
@@ -131,6 +135,9 @@ Examples:
   # Rate-limited API: add 50ms delay between requests
   $ edgefuzz http://localhost:8080 --delay 50
 
+  # Dry run — show preflight summary without sending any requests
+  $ edgefuzz http://localhost:8080 --dry-run
+
 LLM Modes:
   Static only (default):  no key needed — hardcoded adversarial rules
   + Mutations (opt-in):   --llm-mutations → LLM generates semantic payloads too
@@ -172,7 +179,8 @@ async function main() {
     tlsInsecure?: boolean;
     delay?: string;
     responseValidation?: boolean; // --no-response-validation → false
-  }>();
+    dryRun?: boolean;
+  }>(); 
 
   // ---- MCP mode ----
   if (opts.mcp) {
@@ -325,6 +333,7 @@ interface RunFuzzModeArgs {
     tlsInsecure?: boolean;
     delay?: string;
     responseValidation?: boolean; // commander --no-response-validation → false
+    dryRun?: boolean;
   };
   targetUrl: string;
   specPath?: string;
@@ -392,6 +401,7 @@ async function runFuzzMode({ opts, targetUrl, specPath }: RunFuzzModeArgs): Prom
     tlsInsecure: opts.tlsInsecure === true,
     requestDelay: requestDelay > 0 ? requestDelay : undefined,
     skipResponseValidation: opts.responseValidation === false,
+    dryRun: opts.dryRun === true,
   };
 
   const events = runFuzzSessionStream(config);
